@@ -5,25 +5,24 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
+  std/macros,
   stew/assign2,
+  stew/results,
   chronicles,
   ../extras,
   "."/[
     block_id, eth2_merkleization, eth2_ssz_serialization,
     forks_light_client, presets],
-  ./datatypes/[phase0, altair, bellatrix, capella, eip4844],
-  ./mev/bellatrix_mev
+  ./datatypes/[phase0, altair, bellatrix, capella, deneb],
+  ./mev/bellatrix_mev, ./mev/capella_mev
 
 export
-  extras, block_id, phase0, altair, bellatrix, capella, eip4844,
+  extras, block_id, phase0, altair, bellatrix, capella, deneb,
   eth2_merkleization, eth2_ssz_serialization, forks_light_client,
-  presets, bellatrix_mev
+  presets, bellatrix_mev, capella_mev
 
 # This file contains helpers for dealing with forks - we have two ways we can
 # deal with forks:
@@ -42,67 +41,65 @@ export
 # these types and converters :)
 
 type
-  BeaconStateFork* {.pure.} = enum
+  ConsensusFork* {.pure.} = enum
     Phase0,
     Altair,
     Bellatrix,
     Capella,
-    EIP4844
+    Deneb
 
   ForkyBeaconState* =
     phase0.BeaconState |
     altair.BeaconState |
     bellatrix.BeaconState |
     capella.BeaconState |
-    eip4844.BeaconState
+    deneb.BeaconState
 
   ForkyHashedBeaconState* =
     phase0.HashedBeaconState |
     altair.HashedBeaconState |
     bellatrix.HashedBeaconState |
     capella.HashedBeaconState |
-    eip4844.HashedBeaconState
+    deneb.HashedBeaconState
 
   ForkedHashedBeaconState* = object
-    case kind*: BeaconStateFork
-    of BeaconStateFork.Phase0:    phase0Data*:    phase0.HashedBeaconState
-    of BeaconStateFork.Altair:    altairData*:    altair.HashedBeaconState
-    of BeaconStateFork.Bellatrix: bellatrixData*: bellatrix.HashedBeaconState
-    of BeaconStateFork.Capella:   capellaData*:   capella.HashedBeaconState
-    of BeaconStateFork.EIP4844:   eip4844Data*:   eip4844.HashedBeaconState
-
-  BeaconBlockFork* {.pure.} = enum
-    Phase0,
-    Altair,
-    Bellatrix,
-    Capella,
-    EIP4844
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Data*:    phase0.HashedBeaconState
+    of ConsensusFork.Altair:    altairData*:    altair.HashedBeaconState
+    of ConsensusFork.Bellatrix: bellatrixData*: bellatrix.HashedBeaconState
+    of ConsensusFork.Capella:   capellaData*:   capella.HashedBeaconState
+    of ConsensusFork.Deneb:     denebData*:     deneb.HashedBeaconState
 
   ForkyExecutionPayload* =
     bellatrix.ExecutionPayload |
     capella.ExecutionPayload |
-    eip4844.ExecutionPayload
+    deneb.ExecutionPayload
+
+  ForkyExecutionPayloadHeader* =
+    bellatrix.ExecutionPayloadHeader |
+    capella.ExecutionPayloadHeader |
+    deneb.ExecutionPayloadHeader
 
   ForkyBeaconBlockBody* =
     phase0.BeaconBlockBody |
     altair.BeaconBlockBody |
     bellatrix.BeaconBlockBody |
     capella.BeaconBlockBody |
-    eip4844.BeaconBlockBody
+    deneb.BeaconBlockBody
 
   ForkySigVerifiedBeaconBlockBody* =
     phase0.SigVerifiedBeaconBlockBody |
     altair.SigVerifiedBeaconBlockBody |
     bellatrix.SigVerifiedBeaconBlockBody |
     capella.SigVerifiedBeaconBlockBody |
-    eip4844.SigVerifiedBeaconBlockBody
+    deneb.SigVerifiedBeaconBlockBody
 
   ForkyTrustedBeaconBlockBody* =
     phase0.TrustedBeaconBlockBody |
     altair.TrustedBeaconBlockBody |
     bellatrix.TrustedBeaconBlockBody |
     capella.TrustedBeaconBlockBody |
-    eip4844.TrustedBeaconBlockBody
+    deneb.TrustedBeaconBlockBody
 
   SomeForkyBeaconBlockBody* =
     ForkyBeaconBlockBody |
@@ -114,123 +111,129 @@ type
     altair.BeaconBlock |
     bellatrix.BeaconBlock |
     capella.BeaconBlock |
-    eip4844.BeaconBlock
+    deneb.BeaconBlock
 
   ForkySigVerifiedBeaconBlock* =
     phase0.SigVerifiedBeaconBlock |
     altair.SigVerifiedBeaconBlock |
     bellatrix.SigVerifiedBeaconBlock |
     capella.SigVerifiedBeaconBlock |
-    eip4844.SigVerifiedBeaconBlock
+    deneb.SigVerifiedBeaconBlock
 
   ForkyTrustedBeaconBlock* =
     phase0.TrustedBeaconBlock |
     altair.TrustedBeaconBlock |
     bellatrix.TrustedBeaconBlock |
     capella.TrustedBeaconBlock |
-    eip4844.TrustedBeaconBlock
+    deneb.TrustedBeaconBlock
 
   SomeForkyBeaconBlock* =
     ForkyBeaconBlock |
     ForkySigVerifiedBeaconBlock |
     ForkyTrustedBeaconBlock
 
+  ForkyExecutionPayloadForSigning* =
+    bellatrix.ExecutionPayloadForSigning |
+    capella.ExecutionPayloadForSigning |
+    deneb.ExecutionPayloadForSigning
+
   ForkedBeaconBlock* = object
-    case kind*: BeaconBlockFork
-    of BeaconBlockFork.Phase0:    phase0Data*:    phase0.BeaconBlock
-    of BeaconBlockFork.Altair:    altairData*:    altair.BeaconBlock
-    of BeaconBlockFork.Bellatrix: bellatrixData*: bellatrix.BeaconBlock
-    of BeaconBlockFork.Capella:   capellaData*:   capella.BeaconBlock
-    of BeaconBlockFork.EIP4844:   eip4844Data*:   eip4844.BeaconBlock
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Data*:    phase0.BeaconBlock
+    of ConsensusFork.Altair:    altairData*:    altair.BeaconBlock
+    of ConsensusFork.Bellatrix: bellatrixData*: bellatrix.BeaconBlock
+    of ConsensusFork.Capella:   capellaData*:   capella.BeaconBlock
+    of ConsensusFork.Deneb:     denebData*:     deneb.BeaconBlock
 
   Web3SignerForkedBeaconBlock* = object
-    case kind*: BeaconBlockFork
-    of BeaconBlockFork.Phase0:    phase0Data*:    phase0.BeaconBlock
-    of BeaconBlockFork.Altair:    altairData*:    altair.BeaconBlock
-    of BeaconBlockFork.Bellatrix: bellatrixData*: BeaconBlockHeader
-    of BeaconBlockFork.Capella:   capellaData*:   BeaconBlockHeader
-    of BeaconBlockFork.EIP4844:   eip4844Data*:   BeaconBlockHeader
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Data*:    phase0.BeaconBlock
+    of ConsensusFork.Altair:    altairData*:    altair.BeaconBlock
+    of ConsensusFork.Bellatrix: bellatrixData*: BeaconBlockHeader
+    of ConsensusFork.Capella:   capellaData*:   BeaconBlockHeader
+    of ConsensusFork.Deneb:     denebData*:     BeaconBlockHeader
 
   ForkedBlindedBeaconBlock* = object
-    case kind*: BeaconBlockFork
-    of BeaconBlockFork.Phase0:    phase0Data*:    phase0.BeaconBlock
-    of BeaconBlockFork.Altair:    altairData*:    altair.BeaconBlock
-    of BeaconBlockFork.Bellatrix: bellatrixData*: BlindedBeaconBlock
-    of BeaconBlockFork.Capella:   capellaData*:   BlindedBeaconBlock
-    of BeaconBlockFork.EIP4844:   eip4844Data*:   BlindedBeaconBlock
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Data*:    phase0.BeaconBlock
+    of ConsensusFork.Altair:    altairData*:    altair.BeaconBlock
+    of ConsensusFork.Bellatrix: bellatrixData*: bellatrix_mev.BlindedBeaconBlock
+    of ConsensusFork.Capella:   capellaData*:   capella_mev.BlindedBeaconBlock
+    of ConsensusFork.Deneb:     denebData*:     capella_mev.BlindedBeaconBlock
 
   ForkedTrustedBeaconBlock* = object
-    case kind*: BeaconBlockFork
-    of BeaconBlockFork.Phase0:    phase0Data*:     phase0.TrustedBeaconBlock
-    of BeaconBlockFork.Altair:    altairData*:     altair.TrustedBeaconBlock
-    of BeaconBlockFork.Bellatrix: bellatrixData*:  bellatrix.TrustedBeaconBlock
-    of BeaconBlockFork.Capella:   capellaData*:    capella.TrustedBeaconBlock
-    of BeaconBlockFork.EIP4844:   eip4844Data*:    eip4844.TrustedBeaconBlock
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Data*:     phase0.TrustedBeaconBlock
+    of ConsensusFork.Altair:    altairData*:     altair.TrustedBeaconBlock
+    of ConsensusFork.Bellatrix: bellatrixData*:  bellatrix.TrustedBeaconBlock
+    of ConsensusFork.Capella:   capellaData*:    capella.TrustedBeaconBlock
+    of ConsensusFork.Deneb:     denebData*:      deneb.TrustedBeaconBlock
 
   ForkySignedBeaconBlock* =
     phase0.SignedBeaconBlock |
     altair.SignedBeaconBlock |
     bellatrix.SignedBeaconBlock |
     capella.SignedBeaconBlock |
-    eip4844.SignedBeaconBlock
+    deneb.SignedBeaconBlock
 
   ForkedSignedBeaconBlock* = object
-    case kind*: BeaconBlockFork
-    of BeaconBlockFork.Phase0:    phase0Data*:    phase0.SignedBeaconBlock
-    of BeaconBlockFork.Altair:    altairData*:    altair.SignedBeaconBlock
-    of BeaconBlockFork.Bellatrix: bellatrixData*: bellatrix.SignedBeaconBlock
-    of BeaconBlockFork.Capella:   capellaData*:   capella.SignedBeaconBlock
-    of BeaconBlockFork.EIP4844:   eip4844Data*:   eip4844.SignedBeaconBlock
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Data*:    phase0.SignedBeaconBlock
+    of ConsensusFork.Altair:    altairData*:    altair.SignedBeaconBlock
+    of ConsensusFork.Bellatrix: bellatrixData*: bellatrix.SignedBeaconBlock
+    of ConsensusFork.Capella:   capellaData*:   capella.SignedBeaconBlock
+    of ConsensusFork.Deneb:     denebData*:     deneb.SignedBeaconBlock
 
   ForkySignedBlindedBeaconBlock* =
     phase0.SignedBeaconBlock |
     altair.SignedBeaconBlock |
-    SignedBlindedBeaconBlock
+    bellatrix_mev.SignedBlindedBeaconBlock |
+    capella_mev.SignedBlindedBeaconBlock
 
   ForkedSignedBlindedBeaconBlock* = object
-    case kind*: BeaconBlockFork
-    of BeaconBlockFork.Phase0:    phase0Data*:    phase0.SignedBeaconBlock
-    of BeaconBlockFork.Altair:    altairData*:    altair.SignedBeaconBlock
-    of BeaconBlockFork.Bellatrix: bellatrixData*: SignedBlindedBeaconBlock
-    of BeaconBlockFork.Capella:   capellaData*:   SignedBlindedBeaconBlock
-    of BeaconBlockFork.EIP4844:   eip4844Data*:   SignedBlindedBeaconBlock
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Data*:    phase0.SignedBeaconBlock
+    of ConsensusFork.Altair:    altairData*:    altair.SignedBeaconBlock
+    of ConsensusFork.Bellatrix: bellatrixData*: bellatrix_mev.SignedBlindedBeaconBlock
+    of ConsensusFork.Capella:   capellaData*:   capella_mev.SignedBlindedBeaconBlock
+    of ConsensusFork.Deneb:     denebData*:     capella_mev.SignedBlindedBeaconBlock
 
   ForkySigVerifiedSignedBeaconBlock* =
     phase0.SigVerifiedSignedBeaconBlock |
     altair.SigVerifiedSignedBeaconBlock |
     bellatrix.SigVerifiedSignedBeaconBlock |
     capella.SigVerifiedSignedBeaconBlock |
-    eip4844.SigVerifiedSignedBeaconBlock
+    deneb.SigVerifiedSignedBeaconBlock
 
   ForkyMsgTrustedSignedBeaconBlock* =
     phase0.MsgTrustedSignedBeaconBlock |
     altair.MsgTrustedSignedBeaconBlock |
     bellatrix.MsgTrustedSignedBeaconBlock |
     capella.MsgTrustedSignedBeaconBlock |
-    eip4844.MsgTrustedSignedBeaconBlock
+    deneb.MsgTrustedSignedBeaconBlock
 
   ForkyTrustedSignedBeaconBlock* =
     phase0.TrustedSignedBeaconBlock |
     altair.TrustedSignedBeaconBlock |
     bellatrix.TrustedSignedBeaconBlock |
     capella.TrustedSignedBeaconBlock |
-    eip4844.TrustedSignedBeaconBlock
+    deneb.TrustedSignedBeaconBlock
 
   ForkedMsgTrustedSignedBeaconBlock* = object
-    case kind*: BeaconBlockFork
-    of BeaconBlockFork.Phase0:    phase0Data*:    phase0.MsgTrustedSignedBeaconBlock
-    of BeaconBlockFork.Altair:    altairData*:    altair.MsgTrustedSignedBeaconBlock
-    of BeaconBlockFork.Bellatrix: bellatrixData*: bellatrix.MsgTrustedSignedBeaconBlock
-    of BeaconBlockFork.Capella:   capellaData*:   capella.MsgTrustedSignedBeaconBlock
-    of BeaconBlockFork.EIP4844:   eip4844Data*:   eip4844.MsgTrustedSignedBeaconBlock
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Data*:    phase0.MsgTrustedSignedBeaconBlock
+    of ConsensusFork.Altair:    altairData*:    altair.MsgTrustedSignedBeaconBlock
+    of ConsensusFork.Bellatrix: bellatrixData*: bellatrix.MsgTrustedSignedBeaconBlock
+    of ConsensusFork.Capella:   capellaData*:   capella.MsgTrustedSignedBeaconBlock
+    of ConsensusFork.Deneb:     denebData*:     deneb.MsgTrustedSignedBeaconBlock
 
   ForkedTrustedSignedBeaconBlock* = object
-    case kind*: BeaconBlockFork
-    of BeaconBlockFork.Phase0:    phase0Data*:    phase0.TrustedSignedBeaconBlock
-    of BeaconBlockFork.Altair:    altairData*:    altair.TrustedSignedBeaconBlock
-    of BeaconBlockFork.Bellatrix: bellatrixData*: bellatrix.TrustedSignedBeaconBlock
-    of BeaconBlockFork.Capella:   capellaData*:   capella.TrustedSignedBeaconBlock
-    of BeaconBlockFork.EIP4844:   eip4844Data*:   eip4844.TrustedSignedBeaconBlock
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Data*:    phase0.TrustedSignedBeaconBlock
+    of ConsensusFork.Altair:    altairData*:    altair.TrustedSignedBeaconBlock
+    of ConsensusFork.Bellatrix: bellatrixData*: bellatrix.TrustedSignedBeaconBlock
+    of ConsensusFork.Capella:   capellaData*:   capella.TrustedSignedBeaconBlock
+    of ConsensusFork.Deneb:     denebData*:     deneb.TrustedSignedBeaconBlock
 
   SomeForkySignedBeaconBlock* =
     ForkySignedBeaconBlock |
@@ -254,300 +257,270 @@ type
     altair*:    ForkDigest
     bellatrix*: ForkDigest
     capella*:   ForkDigest
-    eip4844*:   ForkDigest
+    deneb*:     ForkDigest
 
-# The purpose of this type is to unify the pre- and post-EIP4844
-# block gossip structures. It is for used only for
-# gossip-originating blocks, which are eventually separated into the
-# constituent parts before passing along into core functions.
-type  ForkySignedBeaconBlockMaybeBlobs* =
-  phase0.SignedBeaconBlock |
-  altair.SignedBeaconBlock |
-  bellatrix.SignedBeaconBlock |
-  capella.SignedBeaconBlock |
-  eip4844.SignedBeaconBlockAndBlobsSidecar
-# ForkySignedBeaconBlockMaybeBlobs should only contain types that are gossiped.
-static: doAssert not (default(eip4844.SignedBeaconBlock) is ForkySignedBeaconBlockMaybeBlobs)
+macro getSymbolFromForkModule(fork: static ConsensusFork,
+                              symbolName: static string): untyped =
+  let moduleName = case fork
+    of ConsensusFork.Phase0: "phase0"
+    of ConsensusFork.Altair: "altair"
+    of ConsensusFork.Bellatrix: "bellatrix"
+    of ConsensusFork.Capella: "capella"
+    of ConsensusFork.Deneb:   "deneb"
+  newDotExpr(ident moduleName, ident symbolName)
 
-template toSignedBeaconBlock*(b: ForkySignedBeaconBlockMaybeBlobs): ForkySignedBeaconBlock =
-  when b is eip4844.SignedBeaconBlockAndBlobsSidecar:
-    b.beacon_block
-  else:
-    b
+template BeaconStateType*(fork: static ConsensusFork): auto =
+  getSymbolFromForkModule(fork, "BeaconState")
 
-template toFork*[T: phase0.BeaconState | phase0.HashedBeaconState](
-    t: type T): BeaconStateFork =
-  BeaconStateFork.Phase0
-template toFork*[T: altair.BeaconState | altair.HashedBeaconState](
-    t: type T): BeaconStateFork =
-  BeaconStateFork.Altair
-template toFork*[T: bellatrix.BeaconState | bellatrix.HashedBeaconState](
-    t: type T): BeaconStateFork =
-  BeaconStateFork.Bellatrix
-template toFork*[T: capella.BeaconState | capella.HashedBeaconState](
-    t: type T): BeaconStateFork =
-  BeaconStateFork.Capella
-template toFork*[T: eip4844.BeaconState | eip4844.HashedBeaconState](
-    t: type T): BeaconStateFork =
-  BeaconStateFork.EIP4844
+template BeaconBlockType*(fork: static ConsensusFork): auto =
+  getSymbolFromForkModule(fork, "BeaconBlock")
 
-template BeaconState*(kind: static BeaconStateFork): auto =
-  when kind == BeaconStateFork.EIP4844:
-    typedesc[eip4844.BeaconState]
-  elif kind == BeaconStateFork.Capella:
-    typedesc[capella.BeaconState]
-  elif kind == BeaconStateFork.Bellatrix:
-    typedesc[bellatrix.BeaconState]
-  elif kind == BeaconStateFork.Altair:
-    typedesc[altair.BeaconState]
-  elif kind == BeaconStateFork.Phase0:
-    typedesc[phase0.BeaconState]
+template BeaconBlockBodyType*(fork: static ConsensusFork): auto =
+  getSymbolFromForkModule(fork, "BeaconBlockBody")
+
+template ExecutionPayloadForSigning*(kind: static ConsensusFork): auto =
+  when kind == ConsensusFork.Deneb:
+    typedesc[deneb.ExecutionPayloadForSigning]
+  elif kind == ConsensusFork.Capella:
+    typedesc[capella.ExecutionPayloadForSigning]
+  elif kind == ConsensusFork.Bellatrix:
+    typedesc[bellatrix.ExecutionPayloadForSigning]
   else:
     static: raiseAssert "Unreachable"
 
-template withStateFork*(
-    x: BeaconStateFork, body: untyped): untyped =
+template withConsensusFork*(
+    x: ConsensusFork, body: untyped): untyped =
   case x
-  of BeaconStateFork.EIP4844:
-    const stateFork {.inject, used.} = BeaconStateFork.Eip4844
+  of ConsensusFork.Deneb:
+    const consensusFork {.inject, used.} = ConsensusFork.Deneb
     body
-  of BeaconStateFork.Capella:
-    const stateFork {.inject, used.} = BeaconStateFork.Capella
+  of ConsensusFork.Capella:
+    const consensusFork {.inject, used.} = ConsensusFork.Capella
     body
-  of BeaconStateFork.Bellatrix:
-    const stateFork {.inject, used.} = BeaconStateFork.Bellatrix
+  of ConsensusFork.Bellatrix:
+    const consensusFork {.inject, used.} = ConsensusFork.Bellatrix
     body
-  of BeaconStateFork.Altair:
-    const stateFork {.inject, used.} = BeaconStateFork.Altair
+  of ConsensusFork.Altair:
+    const consensusFork {.inject, used.} = ConsensusFork.Altair
     body
-  of BeaconStateFork.Phase0:
-    const stateFork {.inject, used.} = BeaconStateFork.Phase0
+  of ConsensusFork.Phase0:
+    const consensusFork {.inject, used.} = ConsensusFork.Phase0
     body
 
 # TODO when https://github.com/nim-lang/Nim/issues/21086 fixed, use return type
 # `ref T`
 func new*(T: type ForkedHashedBeaconState, data: phase0.BeaconState):
     ref ForkedHashedBeaconState =
-  (ref T)(kind: BeaconStateFork.Phase0, phase0Data: phase0.HashedBeaconState(
+  (ref T)(kind: ConsensusFork.Phase0, phase0Data: phase0.HashedBeaconState(
     data: data, root: hash_tree_root(data)))
 func new*(T: type ForkedHashedBeaconState, data: altair.BeaconState):
     ref ForkedHashedBeaconState =
-  (ref T)(kind: BeaconStateFork.Altair, altairData: altair.HashedBeaconState(
+  (ref T)(kind: ConsensusFork.Altair, altairData: altair.HashedBeaconState(
     data: data, root: hash_tree_root(data)))
 func new*(T: type ForkedHashedBeaconState, data: bellatrix.BeaconState):
     ref ForkedHashedBeaconState =
-  (ref T)(kind: BeaconStateFork.Bellatrix, bellatrixData: bellatrix.HashedBeaconState(
+  (ref T)(kind: ConsensusFork.Bellatrix, bellatrixData: bellatrix.HashedBeaconState(
     data: data, root: hash_tree_root(data)))
 func new*(T: type ForkedHashedBeaconState, data: capella.BeaconState):
     ref ForkedHashedBeaconState =
-  (ref T)(kind: BeaconStateFork.Capella, capellaData: capella.HashedBeaconState(
+  (ref T)(kind: ConsensusFork.Capella, capellaData: capella.HashedBeaconState(
     data: data, root: hash_tree_root(data)))
-func new*(T: type ForkedHashedBeaconState, data: eip4844.BeaconState):
+func new*(T: type ForkedHashedBeaconState, data: deneb.BeaconState):
     ref ForkedHashedBeaconState =
-  (ref T)(kind: BeaconStateFork.EIP4844, eip4844Data: eip4844.HashedBeaconState(
+  (ref T)(kind: ConsensusFork.Deneb, denebData: deneb.HashedBeaconState(
     data: data, root: hash_tree_root(data)))
 
 template init*(T: type ForkedBeaconBlock, blck: phase0.BeaconBlock): T =
-  T(kind: BeaconBlockFork.Phase0, phase0Data: blck)
+  T(kind: ConsensusFork.Phase0, phase0Data: blck)
 template init*(T: type ForkedBeaconBlock, blck: altair.BeaconBlock): T =
-  T(kind: BeaconBlockFork.Altair, altairData: blck)
+  T(kind: ConsensusFork.Altair, altairData: blck)
 template init*(T: type ForkedBeaconBlock, blck: bellatrix.BeaconBlock): T =
-  T(kind: BeaconBlockFork.Bellatrix, bellatrixData: blck)
+  T(kind: ConsensusFork.Bellatrix, bellatrixData: blck)
 template init*(T: type ForkedBeaconBlock, blck: capella.BeaconBlock): T =
-  T(kind: BeaconBlockFork.Capella, capellaData: blck)
+  T(kind: ConsensusFork.Capella, capellaData: blck)
+template init*(T: type ForkedBeaconBlock, blck: deneb.BeaconBlock): T =
+  T(kind: ConsensusFork.Deneb, denebData: blck)
 
 template init*(T: type ForkedTrustedBeaconBlock, blck: phase0.TrustedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Phase0, phase0Data: blck)
+  T(kind: ConsensusFork.Phase0, phase0Data: blck)
 template init*(T: type ForkedTrustedBeaconBlock, blck: altair.TrustedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Altair, altairData: blck)
+  T(kind: ConsensusFork.Altair, altairData: blck)
 template init*(T: type ForkedTrustedBeaconBlock, blck: bellatrix.TrustedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Bellatrix, bellatrixData: blck)
+  T(kind: ConsensusFork.Bellatrix, bellatrixData: blck)
 template init*(T: type ForkedTrustedBeaconBlock, blck: capella.TrustedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Capella, capellaData: blck)
+  T(kind: ConsensusFork.Capella, capellaData: blck)
 
 template init*(T: type ForkedSignedBeaconBlock, blck: phase0.SignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Phase0, phase0Data: blck)
+  T(kind: ConsensusFork.Phase0, phase0Data: blck)
 template init*(T: type ForkedSignedBeaconBlock, blck: altair.SignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Altair, altairData: blck)
+  T(kind: ConsensusFork.Altair, altairData: blck)
 template init*(T: type ForkedSignedBeaconBlock, blck: bellatrix.SignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Bellatrix, bellatrixData: blck)
+  T(kind: ConsensusFork.Bellatrix, bellatrixData: blck)
 template init*(T: type ForkedSignedBeaconBlock, blck: capella.SignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Capella, capellaData: blck)
-template init*(T: type ForkedSignedBeaconBlock, blck: eip4844.SignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.EIP4844, eip4844Data: blck)
+  T(kind: ConsensusFork.Capella, capellaData: blck)
+template init*(T: type ForkedSignedBeaconBlock, blck: deneb.SignedBeaconBlock): T =
+  T(kind: ConsensusFork.Deneb, denebData: blck)
 
 func init*(T: type ForkedSignedBeaconBlock, forked: ForkedBeaconBlock,
            blockRoot: Eth2Digest, signature: ValidatorSig): T =
   case forked.kind
-  of BeaconBlockFork.Phase0:
-    T(kind: BeaconBlockFork.Phase0,
+  of ConsensusFork.Phase0:
+    T(kind: ConsensusFork.Phase0,
       phase0Data: phase0.SignedBeaconBlock(message: forked.phase0Data,
                                            root: blockRoot,
                                            signature: signature))
-  of BeaconBlockFork.Altair:
-    T(kind: BeaconBlockFork.Altair,
+  of ConsensusFork.Altair:
+    T(kind: ConsensusFork.Altair,
       altairData: altair.SignedBeaconBlock(message: forked.altairData,
                                            root: blockRoot,
                                            signature: signature))
-  of BeaconBlockFork.Bellatrix:
-    T(kind: BeaconBlockFork.Bellatrix,
+  of ConsensusFork.Bellatrix:
+    T(kind: ConsensusFork.Bellatrix,
       bellatrixData: bellatrix.SignedBeaconBlock(message: forked.bellatrixData,
                                                  root: blockRoot,
                                                  signature: signature))
-  of BeaconBlockFork.Capella:
-    T(kind: BeaconBlockFork.Capella,
+  of ConsensusFork.Capella:
+    T(kind: ConsensusFork.Capella,
       capellaData: capella.SignedBeaconBlock(message: forked.capellaData,
                                              root: blockRoot,
                                              signature: signature))
-  of BeaconBlockFork.EIP4844:
-    T(kind: BeaconBlockFork.EIP4844,
-      eip4844Data: eip4844.SignedBeaconBlock(message: forked.eip4844Data,
-                                             root: blockRoot,
-                                             signature: signature))
+  of ConsensusFork.Deneb:
+    T(kind: ConsensusFork.Deneb,
+      denebData: deneb.SignedBeaconBlock(message: forked.denebData,
+                                         root: blockRoot,
+                                         signature: signature))
 
 func init*(T: type ForkedSignedBlindedBeaconBlock,
            forked: ForkedBlindedBeaconBlock, blockRoot: Eth2Digest,
            signature: ValidatorSig): T =
   case forked.kind
-  of BeaconBlockFork.Phase0:
-    T(kind: BeaconBlockFork.Phase0,
+  of ConsensusFork.Phase0:
+    T(kind: ConsensusFork.Phase0,
       phase0Data: phase0.SignedBeaconBlock(message: forked.phase0Data,
                                            root: blockRoot,
                                            signature: signature))
-  of BeaconBlockFork.Altair:
-    T(kind: BeaconBlockFork.Altair,
+  of ConsensusFork.Altair:
+    T(kind: ConsensusFork.Altair,
       altairData: altair.SignedBeaconBlock(message: forked.altairData,
                                            root: blockRoot,
                                            signature: signature))
-  of BeaconBlockFork.Bellatrix:
-    T(kind: BeaconBlockFork.Bellatrix,
-      bellatrixData: SignedBlindedBeaconBlock(message: forked.bellatrixData,
-                                              signature: signature))
-  of BeaconBlockFork.Capella:
-    T(kind: BeaconBlockFork.Capella,
-      capellaData: SignedBlindedBeaconBlock(message: forked.capellaData,
-                                            signature: signature))
-  of BeaconBlockFork.EIP4844:
-    T(kind: BeaconBlockFork.EIP4844,
-      eip4844Data: SignedBlindedBeaconBlock(message: forked.eip4844Data,
-                                            signature: signature))
+  of ConsensusFork.Bellatrix:
+    T(kind: ConsensusFork.Bellatrix,
+      bellatrixData: bellatrix_mev.SignedBlindedBeaconBlock(message: forked.bellatrixData,
+                                                            signature: signature))
+  of ConsensusFork.Capella:
+    T(kind: ConsensusFork.Capella,
+      capellaData: capella_mev.SignedBlindedBeaconBlock(message: forked.capellaData,
+                                                        signature: signature))
+  of ConsensusFork.Deneb:
+    discard $denebImplementationMissing & "forks.nim:init(T: type ForkedSignedBlindedBeaconBlock)"
+    T(kind: ConsensusFork.Deneb,
+      denebData: capella_mev.SignedBlindedBeaconBlock(message: forked.denebData,
+                                                      signature: signature))
 
 template init*(T: type ForkedMsgTrustedSignedBeaconBlock, blck: phase0.MsgTrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Phase0,    phase0Data: blck)
+  T(kind: ConsensusFork.Phase0,    phase0Data: blck)
 template init*(T: type ForkedMsgTrustedSignedBeaconBlock, blck: altair.MsgTrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Altair,    altairData: blck)
+  T(kind: ConsensusFork.Altair,    altairData: blck)
 template init*(T: type ForkedMsgTrustedSignedBeaconBlock, blck: bellatrix.MsgTrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Bellatrix, bellatrixData: blck)
+  T(kind: ConsensusFork.Bellatrix, bellatrixData: blck)
 template init*(T: type ForkedMsgTrustedSignedBeaconBlock, blck: capella.MsgTrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Capella,   capellaData: blck)
-template init*(T: type ForkedMsgTrustedSignedBeaconBlock, blck: eip4844.MsgTrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.EIP4844,   eip4844Data: blck)
-
+  T(kind: ConsensusFork.Capella,   capellaData: blck)
+template init*(T: type ForkedMsgTrustedSignedBeaconBlock, blck: deneb.MsgTrustedSignedBeaconBlock): T =
+  T(kind: ConsensusFork.Deneb,     denebData: blck)
 
 template init*(T: type ForkedTrustedSignedBeaconBlock, blck: phase0.TrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Phase0, phase0Data: blck)
+  T(kind: ConsensusFork.Phase0, phase0Data: blck)
 template init*(T: type ForkedTrustedSignedBeaconBlock, blck: altair.TrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Altair, altairData: blck)
+  T(kind: ConsensusFork.Altair, altairData: blck)
 template init*(T: type ForkedTrustedSignedBeaconBlock, blck: bellatrix.TrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Bellatrix, bellatrixData: blck)
+  T(kind: ConsensusFork.Bellatrix, bellatrixData: blck)
 template init*(T: type ForkedTrustedSignedBeaconBlock, blck: capella.TrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.Capella, capellaData: blck)
-template init*(T: type ForkedTrustedSignedBeaconBlock, blck: eip4844.TrustedSignedBeaconBlock): T =
-  T(kind: BeaconBlockFork.EIP4844, eip4844Data: blck)
+  T(kind: ConsensusFork.Capella, capellaData: blck)
+template init*(T: type ForkedTrustedSignedBeaconBlock, blck: deneb.TrustedSignedBeaconBlock): T =
+  T(kind: ConsensusFork.Deneb,   denebData: blck)
 
-template toString*(kind: BeaconBlockFork): string =
+template toString*(kind: ConsensusFork): string =
   case kind
-  of BeaconBlockFork.Phase0:
+  of ConsensusFork.Phase0:
     "phase0"
-  of BeaconBlockFork.Altair:
+  of ConsensusFork.Altair:
     "altair"
-  of BeaconBlockFork.Bellatrix:
+  of ConsensusFork.Bellatrix:
     "bellatrix"
-  of BeaconBlockFork.Capella:
+  of ConsensusFork.Capella:
     "capella"
-  of BeaconBlockFork.EIP4844:
-    "eip4844"
-
-template toString*(kind: BeaconStateFork): string =
-  case kind
-  of BeaconStateFork.Phase0:
-    "phase0"
-  of BeaconStateFork.Altair:
-    "altair"
-  of BeaconStateFork.Bellatrix:
-    "bellatrix"
-  of BeaconStateFork.Capella:
-    "capella"
-  of BeaconStateFork.EIP4844:
-    "eip4844"
+  of ConsensusFork.Deneb:
+    "deneb"
 
 template toFork*[T:
+    phase0.BeaconState |
+    phase0.HashedBeaconState |
     phase0.BeaconBlock |
     phase0.SignedBeaconBlock |
     phase0.TrustedBeaconBlock |
     phase0.SigVerifiedSignedBeaconBlock |
     phase0.MsgTrustedSignedBeaconBlock |
     phase0.TrustedSignedBeaconBlock](
-    t: type T): BeaconBlockFork =
-  BeaconBlockFork.Phase0
+    t: type T): ConsensusFork =
+  ConsensusFork.Phase0
 
 template toFork*[T:
+    altair.BeaconState |
+    altair.HashedBeaconState |
     altair.BeaconBlock |
     altair.SignedBeaconBlock |
     altair.TrustedBeaconBlock |
     altair.SigVerifiedSignedBeaconBlock |
     altair.MsgTrustedSignedBeaconBlock |
     altair.TrustedSignedBeaconBlock](
-    t: type T): BeaconBlockFork =
-  BeaconBlockFork.Altair
+    t: type T): ConsensusFork =
+  ConsensusFork.Altair
 
 template toFork*[T:
+    bellatrix.BeaconState |
+    bellatrix.HashedBeaconState |
     bellatrix.ExecutionPayload |
+    bellatrix.ExecutionPayloadForSigning |
+    bellatrix.ExecutionPayloadHeader |
     bellatrix.BeaconBlock |
     bellatrix.SignedBeaconBlock |
     bellatrix.TrustedBeaconBlock |
     bellatrix.SigVerifiedSignedBeaconBlock |
     bellatrix.MsgTrustedSignedBeaconBlock |
     bellatrix.TrustedSignedBeaconBlock](
-    t: type T): BeaconBlockFork =
-  BeaconBlockFork.Bellatrix
+    t: type T): ConsensusFork =
+  ConsensusFork.Bellatrix
 
 template toFork*[T:
+    capella.BeaconState |
+    capella.HashedBeaconState |
     capella.ExecutionPayload |
+    capella.ExecutionPayloadForSigning |
+    capella.ExecutionPayloadHeader |
     capella.BeaconBlock |
     capella.SignedBeaconBlock |
     capella.TrustedBeaconBlock |
     capella.SigVerifiedSignedBeaconBlock |
     capella.MsgTrustedSignedBeaconBlock |
     capella.TrustedSignedBeaconBlock](
-    t: type T): BeaconBlockFork =
-  BeaconBlockFork.Capella
+    t: type T): ConsensusFork =
+  ConsensusFork.Capella
 
 template toFork*[T:
-    eip4844.ExecutionPayload |
-    eip4844.BeaconBlock |
-    eip4844.SignedBeaconBlock |
-    eip4844.SignedBeaconBlockAndBlobsSidecar |
-    eip4844.TrustedBeaconBlock |
-    eip4844.SigVerifiedSignedBeaconBlock |
-    eip4844.MsgTrustedSignedBeaconBlock |
-    eip4844.TrustedSignedBeaconBlock](
-    t: type T): BeaconBlockFork =
-  BeaconBlockFork.EIP4844
-
-template BeaconBlockBody*(kind: static BeaconBlockFork): auto =
-  when kind == BeaconBlockFork.EIP4844:
-    typedesc[eip4844.BeaconBlockBody]
-  elif kind == BeaconBlockFork.Capella:
-    typedesc[capella.BeaconBlockBody]
-  elif kind == BeaconBlockFork.Bellatrix:
-    typedesc[bellatrix.BeaconBlockBody]
-  elif kind == BeaconBlockFork.Altair:
-    typedesc[altair.BeaconBlockBody]
-  elif kind == BeaconBlockFork.Phase0:
-    typedesc[phase0.BeaconBlockBody]
-  else:
-    static: raiseAssert "Unreachable"
+    deneb.BeaconState |
+    deneb.HashedBeaconState |
+    deneb.ExecutionPayload |
+    deneb.ExecutionPayloadForSigning |
+    deneb.ExecutionPayloadHeader |
+    deneb.BeaconBlock |
+    deneb.SignedBeaconBlock |
+    deneb.TrustedBeaconBlock |
+    deneb.SigVerifiedSignedBeaconBlock |
+    deneb.MsgTrustedSignedBeaconBlock |
+    deneb.TrustedSignedBeaconBlock](
+    t: type T): ConsensusFork =
+  ConsensusFork.Deneb
 
 template init*(T: type ForkedEpochInfo, info: phase0.EpochInfo): T =
   T(kind: EpochInfoFork.Phase0, phase0Data: info)
@@ -556,24 +529,24 @@ template init*(T: type ForkedEpochInfo, info: altair.EpochInfo): T =
 
 template withState*(x: ForkedHashedBeaconState, body: untyped): untyped =
   case x.kind
-  of BeaconStateFork.EIP4844:
-    const stateFork {.inject, used.} = BeaconStateFork.EIP4844
-    template forkyState: untyped {.inject, used.} = x.eip4844Data
+  of ConsensusFork.Deneb:
+    const consensusFork {.inject, used.} = ConsensusFork.Deneb
+    template forkyState: untyped {.inject, used.} = x.denebData
     body
-  of BeaconStateFork.Capella:
-    const stateFork {.inject, used.} = BeaconStateFork.Capella
+  of ConsensusFork.Capella:
+    const consensusFork {.inject, used.} = ConsensusFork.Capella
     template forkyState: untyped {.inject, used.} = x.capellaData
     body
-  of BeaconStateFork.Bellatrix:
-    const stateFork {.inject, used.} = BeaconStateFork.Bellatrix
+  of ConsensusFork.Bellatrix:
+    const consensusFork {.inject, used.} = ConsensusFork.Bellatrix
     template forkyState: untyped {.inject, used.} = x.bellatrixData
     body
-  of BeaconStateFork.Altair:
-    const stateFork {.inject, used.} = BeaconStateFork.Altair
+  of ConsensusFork.Altair:
+    const consensusFork {.inject, used.} = ConsensusFork.Altair
     template forkyState: untyped {.inject, used.} = x.altairData
     body
-  of BeaconStateFork.Phase0:
-    const stateFork {.inject, used.} = BeaconStateFork.Phase0
+  of ConsensusFork.Phase0:
+    const consensusFork {.inject, used.} = ConsensusFork.Phase0
     template forkyState: untyped {.inject, used.} = x.phase0Data
     body
 
@@ -598,7 +571,7 @@ template withEpochInfo*(
 
 template withEpochInfo*(
     state: altair.BeaconState | bellatrix.BeaconState | capella.BeaconState |
-           eip4844.BeaconState,
+           deneb.BeaconState,
     x: var ForkedEpochInfo, body: untyped): untyped =
   if x.kind != EpochInfoFork.Altair:
     # Rare, so efficiency not critical
@@ -609,15 +582,15 @@ template withEpochInfo*(
 func assign*(tgt: var ForkedHashedBeaconState, src: ForkedHashedBeaconState) =
   if tgt.kind == src.kind:
     case tgt.kind
-    of BeaconStateFork.EIP4844:
-      assign(tgt.eip4844Data, src.eip4844Data):
-    of BeaconStateFork.Capella:
-      assign(tgt.capellaData, src.capellaData):
-    of BeaconStateFork.Bellatrix:
+    of ConsensusFork.Deneb:
+      assign(tgt.denebData,     src.denebData):
+    of ConsensusFork.Capella:
+      assign(tgt.capellaData,   src.capellaData):
+    of ConsensusFork.Bellatrix:
       assign(tgt.bellatrixData, src.bellatrixData):
-    of BeaconStateFork.Altair:
+    of ConsensusFork.Altair:
       assign(tgt.altairData,    src.altairData):
-    of BeaconStateFork.Phase0:
+    of ConsensusFork.Phase0:
       assign(tgt.phase0Data,    src.phase0Data):
   else:
     # Ensure case object and discriminator get updated simultaneously, even
@@ -631,11 +604,11 @@ template getStateField*(x: ForkedHashedBeaconState, y: untyped): untyped =
   # ```
   # Without `unsafeAddr`, the `validators` list would be copied to a temporary variable.
   (case x.kind
-  of BeaconStateFork.EIP4844:   unsafeAddr x.eip4844Data.data.y
-  of BeaconStateFork.Capella:   unsafeAddr x.capellaData.data.y
-  of BeaconStateFork.Bellatrix: unsafeAddr x.bellatrixData.data.y
-  of BeaconStateFork.Altair:    unsafeAddr x.altairData.data.y
-  of BeaconStateFork.Phase0:    unsafeAddr x.phase0Data.data.y)[]
+  of ConsensusFork.Deneb:     unsafeAddr x.denebData.data.y
+  of ConsensusFork.Capella:   unsafeAddr x.capellaData.data.y
+  of ConsensusFork.Bellatrix: unsafeAddr x.bellatrixData.data.y
+  of ConsensusFork.Altair:    unsafeAddr x.altairData.data.y
+  of ConsensusFork.Phase0:    unsafeAddr x.phase0Data.data.y)[]
 
 func getStateRoot*(x: ForkedHashedBeaconState): Eth2Digest =
   withState(x): forkyState.root
@@ -643,64 +616,55 @@ func getStateRoot*(x: ForkedHashedBeaconState): Eth2Digest =
 func setStateRoot*(x: var ForkedHashedBeaconState, root: Eth2Digest) =
   withState(x): forkyState.root = root
 
-func stateForkAtEpoch*(cfg: RuntimeConfig, epoch: Epoch): BeaconStateFork =
+func consensusForkAtEpoch*(cfg: RuntimeConfig, epoch: Epoch): ConsensusFork =
   ## Return the current fork for the given epoch.
   static:
-    doAssert high(BeaconStateFork) == BeaconStateFork.EIP4844
-    doAssert BeaconStateFork.EIP4844   > BeaconStateFork.Capella
-    doAssert BeaconStateFork.Capella   > BeaconStateFork.Bellatrix
-    doAssert BeaconStateFork.Bellatrix > BeaconStateFork.Altair
-    doAssert BeaconStateFork.Altair    > BeaconStateFork.Phase0
+    doAssert high(ConsensusFork) == ConsensusFork.Deneb
+    doAssert ConsensusFork.Deneb     > ConsensusFork.Capella
+    doAssert ConsensusFork.Capella   > ConsensusFork.Bellatrix
+    doAssert ConsensusFork.Bellatrix > ConsensusFork.Altair
+    doAssert ConsensusFork.Altair    > ConsensusFork.Phase0
     doAssert GENESIS_EPOCH == 0
 
-  if   epoch >= cfg.EIP4844_FORK_EPOCH:   BeaconStateFork.EIP4844
-  elif epoch >= cfg.CAPELLA_FORK_EPOCH:   BeaconStateFork.Capella
-  elif epoch >= cfg.BELLATRIX_FORK_EPOCH: BeaconStateFork.Bellatrix
-  elif epoch >= cfg.ALTAIR_FORK_EPOCH:    BeaconStateFork.Altair
-  else:                                   BeaconStateFork.Phase0
+  if   epoch >= cfg.DENEB_FORK_EPOCH:     ConsensusFork.Deneb
+  elif epoch >= cfg.CAPELLA_FORK_EPOCH:   ConsensusFork.Capella
+  elif epoch >= cfg.BELLATRIX_FORK_EPOCH: ConsensusFork.Bellatrix
+  elif epoch >= cfg.ALTAIR_FORK_EPOCH:    ConsensusFork.Altair
+  else:                                   ConsensusFork.Phase0
 
-func blockForkAtEpoch*(cfg: RuntimeConfig, epoch: Epoch): BeaconBlockFork =
-  ## Return the current fork for the given epoch.
-  static: doAssert high(BeaconBlockFork) == BeaconBlockFork.EIP4844
-  if   epoch >= cfg.EIP4844_FORK_EPOCH:   BeaconBlockFork.EIP4844
-  elif epoch >= cfg.CAPELLA_FORK_EPOCH:   BeaconBlockFork.Capella
-  elif epoch >= cfg.BELLATRIX_FORK_EPOCH: BeaconBlockFork.Bellatrix
-  elif epoch >= cfg.ALTAIR_FORK_EPOCH:    BeaconBlockFork.Altair
-  else:                                   BeaconBlockFork.Phase0
-
-func stateForkForDigest*(
-    forkDigests: ForkDigests, forkDigest: ForkDigest): Opt[BeaconStateFork] =
-  static: doAssert high(BeaconStateFork) == BeaconStateFork.EIP4844
-  if   forkDigest == forkDigests.eip4844:
-    ok BeaconStateFork.EIP4844
+func consensusForkForDigest*(
+    forkDigests: ForkDigests, forkDigest: ForkDigest): Opt[ConsensusFork] =
+  static: doAssert high(ConsensusFork) == ConsensusFork.Deneb
+  if   forkDigest == forkDigests.deneb:
+    ok ConsensusFork.Deneb
   elif forkDigest == forkDigests.capella:
-    ok BeaconStateFork.Capella
+    ok ConsensusFork.Capella
   elif forkDigest == forkDigests.bellatrix:
-    ok BeaconStateFork.Bellatrix
+    ok ConsensusFork.Bellatrix
   elif forkDigest == forkDigests.altair:
-    ok BeaconStateFork.Altair
+    ok ConsensusFork.Altair
   elif forkDigest == forkDigests.phase0:
-    ok BeaconStateFork.Phase0
+    ok ConsensusFork.Phase0
   else:
     err()
 
-func atStateFork*(
-    forkDigests: ForkDigests, stateFork: BeaconStateFork): ForkDigest =
-  case stateFork
-  of BeaconStateFork.EIP4844:
-    forkDigests.eip4844
-  of BeaconStateFork.Capella:
+func atConsensusFork*(
+    forkDigests: ForkDigests, consensusFork: ConsensusFork): ForkDigest =
+  case consensusFork
+  of ConsensusFork.Deneb:
+    forkDigests.deneb
+  of ConsensusFork.Capella:
     forkDigests.capella
-  of BeaconStateFork.Bellatrix:
+  of ConsensusFork.Bellatrix:
     forkDigests.bellatrix
-  of BeaconStateFork.Altair:
+  of ConsensusFork.Altair:
     forkDigests.altair
-  of BeaconStateFork.Phase0:
+  of ConsensusFork.Phase0:
     forkDigests.phase0
 
 template atEpoch*(
     forkDigests: ForkDigests, epoch: Epoch, cfg: RuntimeConfig): ForkDigest =
-  forkDigests.atStateFork(cfg.stateForkAtEpoch(epoch))
+  forkDigests.atConsensusFork(cfg.consensusForkAtEpoch(epoch))
 
 template asSigned*(
     x: ForkedMsgTrustedSignedBeaconBlock |
@@ -745,25 +709,25 @@ template withBlck*(
        ForkedSignedBlindedBeaconBlock,
     body: untyped): untyped =
   case x.kind
-  of BeaconBlockFork.Phase0:
-    const stateFork {.inject, used.} = BeaconStateFork.Phase0
+  of ConsensusFork.Phase0:
+    const consensusFork {.inject, used.} = ConsensusFork.Phase0
     template blck: untyped {.inject.} = x.phase0Data
     body
-  of BeaconBlockFork.Altair:
-    const stateFork {.inject, used.} = BeaconStateFork.Altair
+  of ConsensusFork.Altair:
+    const consensusFork {.inject, used.} = ConsensusFork.Altair
     template blck: untyped {.inject.} = x.altairData
     body
-  of BeaconBlockFork.Bellatrix:
-    const stateFork {.inject, used.} = BeaconStateFork.Bellatrix
+  of ConsensusFork.Bellatrix:
+    const consensusFork {.inject, used.} = ConsensusFork.Bellatrix
     template blck: untyped {.inject.} = x.bellatrixData
     body
-  of BeaconBlockFork.Capella:
-    const stateFork {.inject, used.} = BeaconStateFork.Capella
+  of ConsensusFork.Capella:
+    const consensusFork {.inject, used.} = ConsensusFork.Capella
     template blck: untyped {.inject.} = x.capellaData
     body
-  of BeaconBlockFork.EIP4844:
-    const stateFork {.inject, used.} = BeaconStateFork.EIP4844
-    template blck: untyped {.inject.} = x.eip4844Data
+  of ConsensusFork.Deneb:
+    const consensusFork {.inject, used.} = ConsensusFork.Deneb
+    template blck: untyped {.inject.} = x.denebData
     body
 
 func proposer_index*(x: ForkedBeaconBlock): uint64 =
@@ -780,11 +744,11 @@ template getForkedBlockField*(
     y: untyped): untyped =
   # unsafeAddr avoids a copy of the field in some cases
   (case x.kind
-  of BeaconBlockFork.Phase0:    unsafeAddr x.phase0Data.message.y
-  of BeaconBlockFork.Altair:    unsafeAddr x.altairData.message.y
-  of BeaconBlockFork.Bellatrix: unsafeAddr x.bellatrixData.message.y
-  of BeaconBlockFork.Capella:   unsafeAddr x.capellaData.message.y
-  of BeaconBlockFork.EIP4844:   unsafeAddr x.eip4844Data.message.y)[]
+  of ConsensusFork.Phase0:    unsafeAddr x.phase0Data.message.y
+  of ConsensusFork.Altair:    unsafeAddr x.altairData.message.y
+  of ConsensusFork.Bellatrix: unsafeAddr x.bellatrixData.message.y
+  of ConsensusFork.Capella:   unsafeAddr x.capellaData.message.y
+  of ConsensusFork.Deneb:     unsafeAddr x.denebData.message.y)[]
 
 template signature*(x: ForkedSignedBeaconBlock |
                        ForkedMsgTrustedSignedBeaconBlock |
@@ -825,34 +789,35 @@ template withStateAndBlck*(
        ForkedTrustedSignedBeaconBlock,
     body: untyped): untyped =
   case s.kind
-  of BeaconStateFork.EIP4844:
-    const stateFork {.inject.} = BeaconStateFork.EIP4844
-    template forkyState: untyped {.inject.} = s.eip4844Data
-    template blck: untyped {.inject.} = b.eip4844Data
+  of ConsensusFork.Deneb:
+    const consensusFork {.inject.} = ConsensusFork.Deneb
+    template forkyState: untyped {.inject.} = s.denebData
+    template blck: untyped {.inject.} = b.denebData
     body
-  of BeaconStateFork.Capella:
-    const stateFork {.inject.} = BeaconStateFork.Capella
+  of ConsensusFork.Capella:
+    const consensusFork {.inject.} = ConsensusFork.Capella
     template forkyState: untyped {.inject.} = s.capellaData
     template blck: untyped {.inject.} = b.capellaData
     body
-  of BeaconStateFork.Bellatrix:
-    const stateFork {.inject.} = BeaconStateFork.Bellatrix
+  of ConsensusFork.Bellatrix:
+    const consensusFork {.inject.} = ConsensusFork.Bellatrix
     template forkyState: untyped {.inject.} = s.bellatrixData
     template blck: untyped {.inject.} = b.bellatrixData
     body
-  of BeaconStateFork.Altair:
-    const stateFork {.inject.} = BeaconStateFork.Altair
+  of ConsensusFork.Altair:
+    const consensusFork {.inject.} = ConsensusFork.Altair
     template forkyState: untyped {.inject.} = s.altairData
     template blck: untyped {.inject.} = b.altairData
     body
-  of BeaconStateFork.Phase0:
-    const stateFork {.inject.} = BeaconStateFork.Phase0
+  of ConsensusFork.Phase0:
+    const consensusFork {.inject.} = ConsensusFork.Phase0
     template forkyState: untyped {.inject.} = s.phase0Data
     template blck: untyped {.inject.} = b.phase0Data
     body
 
 func toBeaconBlockHeader*(
-    blck: SomeForkyBeaconBlock | BlindedBeaconBlock): BeaconBlockHeader =
+    blck: SomeForkyBeaconBlock | bellatrix_mev.BlindedBeaconBlock |
+          capella_mev.BlindedBeaconBlock): BeaconBlockHeader =
   ## Reduce a given `BeaconBlock` to its `BeaconBlockHeader`.
   BeaconBlockHeader(
     slot: blck.slot,
@@ -896,41 +861,53 @@ func capellaFork*(cfg: RuntimeConfig): Fork =
     current_version: cfg.CAPELLA_FORK_VERSION,
     epoch: cfg.CAPELLA_FORK_EPOCH)
 
-func eip4844Fork*(cfg: RuntimeConfig): Fork =
+func denebFork*(cfg: RuntimeConfig): Fork =
   Fork(
     previous_version: cfg.CAPELLA_FORK_VERSION,
-    current_version: cfg.EIP4844_FORK_VERSION,
-    epoch: cfg.EIP4844_FORK_EPOCH)
+    current_version: cfg.DENEB_FORK_VERSION,
+    epoch: cfg.DENEB_FORK_EPOCH)
 
 func forkAtEpoch*(cfg: RuntimeConfig, epoch: Epoch): Fork =
-  case cfg.stateForkAtEpoch(epoch)
-  of BeaconStateFork.EIP4844:   cfg.eip4844Fork
-  of BeaconStateFork.Capella:   cfg.capellaFork
-  of BeaconStateFork.Bellatrix: cfg.bellatrixFork
-  of BeaconStateFork.Altair:    cfg.altairFork
-  of BeaconStateFork.Phase0:    cfg.genesisFork
+  case cfg.consensusForkAtEpoch(epoch)
+  of ConsensusFork.Deneb:     cfg.denebFork
+  of ConsensusFork.Capella:   cfg.capellaFork
+  of ConsensusFork.Bellatrix: cfg.bellatrixFork
+  of ConsensusFork.Altair:    cfg.altairFork
+  of ConsensusFork.Phase0:    cfg.genesisFork
 
 func forkVersionAtEpoch*(cfg: RuntimeConfig, epoch: Epoch): Version =
-  case cfg.stateForkAtEpoch(epoch)
-  of BeaconStateFork.EIP4844:   cfg.EIP4844_FORK_VERSION
-  of BeaconStateFork.Capella:   cfg.CAPELLA_FORK_VERSION
-  of BeaconStateFork.Bellatrix: cfg.BELLATRIX_FORK_VERSION
-  of BeaconStateFork.Altair:    cfg.ALTAIR_FORK_VERSION
-  of BeaconStateFork.Phase0:    cfg.GENESIS_FORK_VERSION
+  case cfg.consensusForkAtEpoch(epoch)
+  of ConsensusFork.Deneb:     cfg.DENEB_FORK_VERSION
+  of ConsensusFork.Capella:   cfg.CAPELLA_FORK_VERSION
+  of ConsensusFork.Bellatrix: cfg.BELLATRIX_FORK_VERSION
+  of ConsensusFork.Altair:    cfg.ALTAIR_FORK_VERSION
+  of ConsensusFork.Phase0:    cfg.GENESIS_FORK_VERSION
 
 func nextForkEpochAtEpoch*(cfg: RuntimeConfig, epoch: Epoch): Epoch =
-  case cfg.stateForkAtEpoch(epoch)
-  of BeaconStateFork.EIP4844:   FAR_FUTURE_EPOCH
-  of BeaconStateFork.Capella:   cfg.EIP4844_FORK_EPOCH
-  of BeaconStateFork.Bellatrix: cfg.CAPELLA_FORK_EPOCH
-  of BeaconStateFork.Altair:    cfg.BELLATRIX_FORK_EPOCH
-  of BeaconStateFork.Phase0:    cfg.ALTAIR_FORK_EPOCH
+  static: doAssert high(ConsensusFork) == ConsensusFork.Deneb
+  case cfg.consensusForkAtEpoch(epoch)
+  of ConsensusFork.Deneb:     FAR_FUTURE_EPOCH
+  of ConsensusFork.Capella:   cfg.DENEB_FORK_EPOCH
+  of ConsensusFork.Bellatrix: cfg.CAPELLA_FORK_EPOCH
+  of ConsensusFork.Altair:    cfg.BELLATRIX_FORK_EPOCH
+  of ConsensusFork.Phase0:    cfg.ALTAIR_FORK_EPOCH
 
-func lcDataForkAtStateFork*(stateFork: BeaconStateFork): LightClientDataFork =
-  static: doAssert LightClientDataFork.high == LightClientDataFork.Capella
-  if stateFork >= BeaconStateFork.Capella:
+func forkVersion*(cfg: RuntimeConfig, consensusFork: ConsensusFork): Version =
+  case consensusFork
+  of ConsensusFork.Phase0:      cfg.GENESIS_FORK_VERSION
+  of ConsensusFork.Altair:      cfg.ALTAIR_FORK_VERSION
+  of ConsensusFork.Bellatrix:   cfg.BELLATRIX_FORK_VERSION
+  of ConsensusFork.Capella:     cfg.CAPELLA_FORK_VERSION
+  of ConsensusFork.Deneb:       cfg.DENEB_FORK_VERSION
+
+func lcDataForkAtConsensusFork*(
+    consensusFork: ConsensusFork): LightClientDataFork =
+  static: doAssert LightClientDataFork.high == LightClientDataFork.Deneb
+  if consensusFork >= ConsensusFork.Deneb:
+    LightClientDataFork.Deneb
+  elif consensusFork >= ConsensusFork.Capella:
     LightClientDataFork.Capella
-  elif stateFork >= BeaconStateFork.Altair:
+  elif consensusFork >= ConsensusFork.Altair:
     LightClientDataFork.Altair
   else:
     LightClientDataFork.None
@@ -942,7 +919,7 @@ func getForkSchedule*(cfg: RuntimeConfig): array[5, Fork] =
   ##
   ## NOTE: Update this procedure when new fork will be scheduled.
   [cfg.genesisFork(), cfg.altairFork(), cfg.bellatrixFork(), cfg.capellaFork(),
-   cfg.eip4844Fork()]
+   cfg.denebFork()]
 
 type
   # The first few fields of a state, shared across all forks
@@ -956,7 +933,7 @@ func readSszForkedHashedBeaconState*(
     ForkedHashedBeaconState {.raises: [Defect, SszError].} =
   # TODO https://github.com/nim-lang/Nim/issues/19357
   result = ForkedHashedBeaconState(
-    kind: cfg.stateForkAtEpoch(slot.epoch()))
+    kind: cfg.consensusForkAtEpoch(slot.epoch()))
 
   withState(result):
     readSszBytes(data, forkyState.data)
@@ -994,20 +971,12 @@ func readSszForkedSignedBeaconBlock*(
 
   # TODO https://github.com/nim-lang/Nim/issues/19357
   result = ForkedSignedBeaconBlock(
-    kind: cfg.blockForkAtEpoch(header.slot.epoch()))
+    kind: cfg.consensusForkAtEpoch(header.slot.epoch()))
 
   withBlck(result):
     readSszBytes(data, blck)
 
-func toBeaconBlockFork*(fork: BeaconStateFork): BeaconBlockFork =
-  case fork
-  of BeaconStateFork.Phase0:    BeaconBlockFork.Phase0
-  of BeaconStateFork.Altair:    BeaconBlockFork.Altair
-  of BeaconStateFork.Bellatrix: BeaconBlockFork.Bellatrix
-  of BeaconStateFork.Capella:   BeaconBlockFork.Capella
-  of BeaconStateFork.EIP4844:   BeaconBlockFork.EIP4844
-
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.0/specs/phase0/beacon-chain.md#compute_fork_data_root
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.3/specs/phase0/beacon-chain.md#compute_fork_data_root
 func compute_fork_data_root*(current_version: Version,
     genesis_validators_root: Eth2Digest): Eth2Digest =
   ## Return the 32-byte fork data root for the ``current_version`` and
@@ -1019,7 +988,7 @@ func compute_fork_data_root*(current_version: Version,
     genesis_validators_root: genesis_validators_root
   ))
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.0/specs/phase0/beacon-chain.md#compute_fork_digest
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/beacon-chain.md#compute_fork_digest
 func compute_fork_digest*(current_version: Version,
                           genesis_validators_root: Eth2Digest): ForkDigest =
   ## Return the 4-byte fork digest for the ``current_version`` and
@@ -1033,7 +1002,7 @@ func compute_fork_digest*(current_version: Version,
 func init*(T: type ForkDigests,
            cfg: RuntimeConfig,
            genesis_validators_root: Eth2Digest): T =
-  static: doAssert high(BeaconStateFork) == BeaconStateFork.EIP4844
+  static: doAssert high(ConsensusFork) == ConsensusFork.Deneb
   T(
     phase0:
       compute_fork_digest(cfg.GENESIS_FORK_VERSION, genesis_validators_root),
@@ -1043,8 +1012,8 @@ func init*(T: type ForkDigests,
       compute_fork_digest(cfg.BELLATRIX_FORK_VERSION, genesis_validators_root),
     capella:
       compute_fork_digest(cfg.CAPELLA_FORK_VERSION, genesis_validators_root),
-    eip4844:
-      compute_fork_digest(cfg.EIP4844_FORK_VERSION, genesis_validators_root)
+    deneb:
+      compute_fork_digest(cfg.DENEB_FORK_VERSION, genesis_validators_root)
   )
 
 func toBlockId*(header: BeaconBlockHeader): BlockId =

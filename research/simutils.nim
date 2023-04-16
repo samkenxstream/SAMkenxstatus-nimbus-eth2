@@ -6,9 +6,8 @@
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
 import
-  stew/io2,
-  stats, os, strformat, times,
-  ../tests/testblockutil,
+  stats, strformat, times,
+  ../tests/testblockutil, ../tests/consensus_spec/os_ops,
   ../beacon_chain/beacon_chain_db,
   ../beacon_chain/spec/datatypes/[phase0, altair],
   ../beacon_chain/spec/[beaconstate, deposit_snapshots, forks, helpers],
@@ -111,7 +110,7 @@ proc loadGenesis*(validators: Natural, validate: bool):
       depositContractState: merkleizer.toDepositContractState)
 
     let res = (ref ForkedHashedBeaconState)(
-      kind: BeaconStateFork.Phase0,
+      kind: ConsensusFork.Phase0,
       phase0Data: initialize_hashed_beacon_state_from_eth1(
         cfg, ZERO_HASH, 0, deposits, flags))
 

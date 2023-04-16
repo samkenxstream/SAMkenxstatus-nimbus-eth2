@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   std/[os, strutils, terminal, wordwrap, unicode],
@@ -37,6 +34,7 @@ const
   RemoteKeystoreFileName* = "remote_keystore.json"
   NetKeystoreFileName* = "network_keystore.json"
   FeeRecipientFilename* = "suggested_fee_recipient.hex"
+  GasLimitFilename* = "suggested_gas_limit.json"
   KeyNameSize* = 98 # 0x + hexadecimal key representation 96 characters.
   MaxKeystoreFileSize* = 65536
 
@@ -67,10 +65,6 @@ type
 
   ImportResult*[T] = Result[T, AddValidatorFailure]
 
-  ValidatorAndIndex* = object
-    index*: ValidatorIndex
-    validator*: Validator
-
   ValidatorPubKeyToDataFn* =
     proc (pubkey: ValidatorPubKey): Opt[ValidatorAndIndex]
          {.raises: [Defect], gcsafe.}
@@ -82,6 +76,7 @@ type
     validatorsDir*: string
     secretsDir*: string
     defaultFeeRecipient*: Eth1Address
+    defaultGasLimit*: uint64
     getValidatorAndIdxFn*: ValidatorPubKeyToDataFn
     getBeaconTimeFn*: GetBeaconTimeFn
 
@@ -101,6 +96,7 @@ func init*(T: type KeymanagerHost,
            validatorsDir: string,
            secretsDir: string,
            defaultFeeRecipient: Eth1Address,
+           defaultGasLimit: uint64,
            getValidatorAndIdxFn: ValidatorPubKeyToDataFn,
            getBeaconTimeFn: GetBeaconTimeFn): T =
   T(validatorPool: validatorPool,
@@ -109,24 +105,9 @@ func init*(T: type KeymanagerHost,
     validatorsDir: validatorsDir,
     secretsDir: secretsDir,
     defaultFeeRecipient: defaultFeeRecipient,
+    defaultGasLimit: defaultGasLimit,
     getValidatorAndIdxFn: getValidatorAndIdxFn,
     getBeaconTimeFn: getBeaconTimeFn)
-
-proc getValidatorIdx*(host: KeymanagerHost,
-                      pubkey: ValidatorPubKey): Opt[ValidatorIndex] =
-  if not(isNil(host.getValidatorAndIdxFn)):
-    let res = host.getValidatorAndIdxFn(pubkey).valueOr:
-      return Opt.none ValidatorIndex
-    Opt.some res.index
-  else:
-    Opt.none ValidatorIndex
-
-proc getValidatorData*(host: KeymanagerHost,
-                       pubkey: ValidatorPubKey): Opt[ValidatorAndIndex] =
-  if not(isNil(host.getValidatorAndIdxFn)):
-    host.getValidatorAndIdxFn(pubkey)
-  else:
-    Opt.none ValidatorAndIndex
 
 proc echoP*(msg: string) =
   ## Prints a paragraph aligned to 80 columns
@@ -400,13 +381,13 @@ proc loadSecretFile*(path: string): KsResult[KeystorePass] {.
   ok(KeystorePass.init(res.get()))
 
 proc loadRemoteKeystoreImpl(validatorsDir,
-                            keyName: string): Option[KeystoreData] =
+                            keyName: string): Opt[KeystoreData] =
   let keystorePath = validatorsDir / keyName / RemoteKeystoreFileName
 
   if not(checkSensitiveFilePermissions(keystorePath)):
     error "Remote keystorage file has insecure permissions",
           key_path = keystorePath
-    return
+    return Opt.none(KeystoreData)
 
   let handle =
     block:
@@ -414,7 +395,7 @@ proc loadRemoteKeystoreImpl(validatorsDir,
       if res.isErr():
         error "Unable to lock keystore file", key_path = keystorePath,
               error_msg = ioErrorMsg(res.error())
-        return
+        return Opt.none(KeystoreData)
       res.get()
 
   var success = false
@@ -428,7 +409,7 @@ proc loadRemoteKeystoreImpl(validatorsDir,
       if gres.isErr():
         error "Could not read remote keystore file", key_path = keystorePath,
               error_msg = ioErrorMsg(gres.error())
-        return
+        return Opt.none(KeystoreData)
       let buffer = gres.get()
       let data =
         try:
@@ -436,19 +417,20 @@ proc loadRemoteKeystoreImpl(validatorsDir,
         except SerializationError as e:
           error "Invalid remote keystore file", key_path = keystorePath,
                 error_msg = e.formatMsg(keystorePath)
-          return
+          return Opt.none(KeystoreData)
       let kres = KeystoreData.init(data, handle)
       if kres.isErr():
         error "Invalid remote keystore file", key_path = keystorePath,
               error_msg = kres.error()
-        return
+        return Opt.none(KeystoreData)
       kres.get()
 
   success = true
-  some(keystore)
+  Opt.some(keystore)
 
 proc loadLocalKeystoreImpl(validatorsDir, secretsDir, keyName: string,
-                           nonInteractive: bool): Option[KeystoreData] =
+                           nonInteractive: bool,
+                           cache: KeystoreCacheRef): Opt[KeystoreData] =
   let
     keystorePath = validatorsDir / keyName / KeystoreFileName
     passphrasePath = secretsDir / keyName
@@ -458,7 +440,7 @@ proc loadLocalKeystoreImpl(validatorsDir, secretsDir, keyName: string,
         if res.isErr():
           error "Unable to lock keystore file", key_path = keystorePath,
                 error_msg = ioErrorMsg(res.error())
-          return
+          return Opt.none(KeystoreData)
         res.get()
 
   var success = false
@@ -473,7 +455,7 @@ proc loadLocalKeystoreImpl(validatorsDir, secretsDir, keyName: string,
         if gres.isErr():
           error "Could not read local keystore file", key_path = keystorePath,
                 error_msg = ioErrorMsg(gres.error())
-          return
+          return Opt.none(KeystoreData)
         let buffer = gres.get()
         let data =
           try:
@@ -481,13 +463,13 @@ proc loadLocalKeystoreImpl(validatorsDir, secretsDir, keyName: string,
           except SerializationError as e:
             error "Invalid local keystore file", key_path = keystorePath,
                   error_msg = e.formatMsg(keystorePath)
-            return
+            return Opt.none(KeystoreData)
         data
 
   if fileExists(passphrasePath):
     if not(checkSensitiveFilePermissions(passphrasePath)):
       error "Password file has insecure permissions", key_path = keystorePath
-      return
+      return Opt.none(KeystoreData)
 
     let passphrase =
       block:
@@ -495,29 +477,30 @@ proc loadLocalKeystoreImpl(validatorsDir, secretsDir, keyName: string,
         if res.isErr():
           error "Failed to read passphrase file", error_msg = res.error(),
                 path = passphrasePath
-          return
+          return Opt.none(KeystoreData)
         res.get()
 
-    let res = decryptKeystore(keystore, passphrase)
+    let res = decryptKeystore(keystore, passphrase, cache)
     if res.isOk():
       success = true
-      return some(KeystoreData.init(res.get(), keystore, handle))
+      return Opt.some(KeystoreData.init(res.get(), keystore, handle))
     else:
       error "Failed to decrypt keystore", key_path = keystorePath,
             secure_path = passphrasePath
-      return
+      return Opt.none(KeystoreData)
 
   if nonInteractive:
     error "Unable to load validator key store. Please ensure matching " &
           "passphrase exists in the secrets dir", key_path = keystorePath,
           key_name = keyName, validatorsDir, secretsDir = secretsDir
-    return
+    return Opt.none(KeystoreData)
 
   let prompt = "Please enter passphrase for key \"" &
                (validatorsDir / keyName) & "\": "
   let res = keyboardGetPassword[ValidatorPrivKey](prompt, 3,
     proc (password: string): KsResult[ValidatorPrivKey] =
-      let decrypted = decryptKeystore(keystore, KeystorePass.init password)
+      let decrypted = decryptKeystore(keystore, KeystorePass.init password,
+                                      cache)
       if decrypted.isErr():
         error "Keystore decryption failed. Please try again",
               keystore_path = keystorePath
@@ -525,25 +508,27 @@ proc loadLocalKeystoreImpl(validatorsDir, secretsDir, keyName: string,
   )
 
   if res.isErr():
-    return
+    return Opt.none(KeystoreData)
 
   success = true
-  some(KeystoreData.init(res.get(), keystore, handle))
+  Opt.some(KeystoreData.init(res.get(), keystore, handle))
 
 proc loadKeystore*(validatorsDir, secretsDir, keyName: string,
-                   nonInteractive: bool): Option[KeystoreData] =
+                   nonInteractive: bool,
+                   cache: KeystoreCacheRef): Opt[KeystoreData] =
   let
     keystorePath = validatorsDir / keyName
     localKeystorePath = keystorePath / KeystoreFileName
     remoteKeystorePath = keystorePath / RemoteKeystoreFileName
 
   if fileExists(localKeystorePath):
-    loadLocalKeystoreImpl(validatorsDir, secretsDir, keyName, nonInteractive)
+    loadLocalKeystoreImpl(validatorsDir, secretsDir, keyName, nonInteractive,
+                          cache)
   elif fileExists(remoteKeystorePath):
     loadRemoteKeystoreImpl(validatorsDir, keyName)
   else:
     error "Unable to find any keystore files", keystorePath
-    none[KeystoreData]()
+    Opt.none(KeystoreData)
 
 proc removeValidatorFiles*(validatorsDir, secretsDir, keyName: string,
                            kind: KeystoreKind
@@ -601,8 +586,7 @@ proc removeValidator*(pool: var ValidatorPool,
                       publicKey: ValidatorPubKey,
                       kind: KeystoreKind): KmResult[RemoveValidatorStatus] {.
      raises: [Defect].} =
-  let validator = pool.getValidator(publicKey)
-  if isNil(validator):
+  let validator = pool.getValidator(publicKey).valueOr:
     return ok(RemoveValidatorStatus.notFound)
   if validator.kind.toKeystoreKind() != kind:
     return ok(RemoveValidatorStatus.notFound)
@@ -681,7 +665,8 @@ iterator listLoadableKeys*(validatorsDir, secretsDir: string,
 
 iterator listLoadableKeystores*(validatorsDir, secretsDir: string,
                                 nonInteractive: bool,
-                                keysMask: set[KeystoreKind]): KeystoreData =
+                                keysMask: set[KeystoreKind],
+                                cache: KeystoreCacheRef): KeystoreData =
   try:
     for kind, file in walkDir(validatorsDir):
       if kind == pcDir:
@@ -702,29 +687,30 @@ iterator listLoadableKeystores*(validatorsDir, secretsDir: string,
         let
           secretFile = secretsDir / keyName
           keystore = loadKeystore(validatorsDir, secretsDir, keyName,
-                                  nonInteractive)
-        if keystore.isSome():
-          yield keystore.get()
-        else:
-          fatal "Unable to load keystore", keystore = file
-          quit 1
+                                  nonInteractive, cache).valueOr:
+            fatal "Unable to load keystore", keystore = file
+            quit 1
+
+        yield keystore
 
   except OSError as err:
     error "Validator keystores directory not accessible",
           path = validatorsDir, err = err.msg
     quit 1
 
-iterator listLoadableKeystores*(config: AnyConf): KeystoreData =
+iterator listLoadableKeystores*(config: AnyConf,
+                                cache: KeystoreCacheRef): KeystoreData =
   for el in listLoadableKeystores(config.validatorsDir(),
                                   config.secretsDir(),
                                   config.nonInteractive,
-                                  {KeystoreKind.Local, KeystoreKind.Remote}):
+                                  {KeystoreKind.Local, KeystoreKind.Remote},
+                                  cache):
     yield el
 
 type
-  FeeRecipientStatus* = enum
+  ValidatorConfigFileStatus* = enum
     noSuchValidator
-    invalidFeeRecipientFile
+    malformedConfigFile
 
 func validatorKeystoreDir(
     validatorsDir: string, pubkey: ValidatorPubKey): string =
@@ -734,10 +720,14 @@ func feeRecipientPath(validatorsDir: string,
                        pubkey: ValidatorPubKey): string =
   validatorsDir.validatorKeystoreDir(pubkey) / FeeRecipientFilename
 
+func gasLimitPath(validatorsDir: string,
+                  pubkey: ValidatorPubKey): string =
+  validatorsDir.validatorKeystoreDir(pubkey) / GasLimitFilename
+
 proc getSuggestedFeeRecipient*(
     validatorsDir: string,
     pubkey: ValidatorPubKey,
-    defaultFeeRecipient: Eth1Address): Result[Eth1Address, FeeRecipientStatus] =
+    defaultFeeRecipient: Eth1Address): Result[Eth1Address, ValidatorConfigFileStatus] =
   # In this particular case, an error might be by design. If the file exists,
   # but doesn't load or parse that's a more urgent matter to fix. Many people
   # people might prefer, however, not to override their default suggested fee
@@ -758,10 +748,37 @@ proc getSuggestedFeeRecipient*(
   except CatchableError as exc:
     # Because the nonexistent validator case was already checked, any failure
     # at this point is serious enough to alert the user.
-    warn "getSuggestedFeeRecipient: failed loading fee recipient file; falling back to default fee recipient",
-      feeRecipientPath,
+    warn "Failed to load fee recipient file; falling back to default fee recipient",
+      feeRecipientPath, defaultFeeRecipient,
       err = exc.msg
-    err invalidFeeRecipientFile
+    err malformedConfigFile
+
+proc getSuggestedGasLimit*(
+    validatorsDir: string,
+    pubkey: ValidatorPubKey,
+    defaultGasLimit: uint64): Result[uint64, ValidatorConfigFileStatus] =
+  # In this particular case, an error might be by design. If the file exists,
+  # but doesn't load or parse that's a more urgent matter to fix. Many people
+  # people might prefer, however, not to override their default suggested gas
+  # limit per validator, so don't warn very loudly, if at all.
+  if not dirExists(validatorsDir.validatorKeystoreDir(pubkey)):
+    return err noSuchValidator
+
+  let gasLimitPath = validatorsDir.gasLimitPath(pubkey)
+  if not fileExists(gasLimitPath):
+    return ok defaultGasLimit
+  try:
+    ok parseBiggestUInt(strutils.strip(
+      readFile(gasLimitPath), leading = false, trailing = true))
+  except SerializationError as e:
+    warn "Invalid local gas limit file", gasLimitPath,
+      err= e.formatMsg(gasLimitPath)
+    err malformedConfigFile
+  except CatchableError as exc:
+    warn "Failed to load gas limit file; falling back to default gas limit",
+      gasLimitPath, defaultGasLimit,
+      err = exc.msg
+    err malformedConfigFile
 
 type
   KeystoreGenerationErrorKind* = enum
@@ -1019,6 +1036,7 @@ proc saveKeystore*(
        signingPubKey: CookedPubKey,
        signingKeyPath: KeyPath,
        password: string,
+       salt: openArray[byte] = @[],
        mode = Secure
      ): Result[void, KeystoreGenerationError] {.raises: [Defect].} =
   let
@@ -1036,7 +1054,7 @@ proc saveKeystore*(
 
   let keyStore = createKeystore(kdfPbkdf2, rng, signingKey,
                                 keypass, signingKeyPath,
-                                mode = mode)
+                                mode = mode, salt = salt)
 
   let encodedStorage =
     try:
@@ -1264,7 +1282,7 @@ proc importKeystore*(pool: var ValidatorPool,
 
   ok(KeystoreData.init(privateKey, keystore, res.get()))
 
-proc generateDistirbutedStore*(rng: var HmacDrbgContext,
+proc generateDistributedStore*(rng: var HmacDrbgContext,
                                shares: seq[SecretShare],
                                pubKey: ValidatorPubKey,
                                validatorIdx: Natural,
@@ -1282,9 +1300,11 @@ proc generateDistirbutedStore*(rng: var HmacDrbgContext,
     ? saveKeystore(rng,
                    shareValidatorDir / $share.id,
                    shareSecretsDir / $share.id,
-                   share.key, share.key.toPubKey,
+                   share.key,
+                   share.key.toPubKey,
                    makeKeyPath(validatorIdx, signingKeyKind),
                    password.str,
+                   @[],
                    mode)
 
     signers.add RemoteSignerInfo(
@@ -1303,9 +1323,23 @@ func feeRecipientPath*(host: KeymanagerHost,
                        pubkey: ValidatorPubKey): string =
   host.validatorsDir.feeRecipientPath(pubkey)
 
+func gasLimitPath*(host: KeymanagerHost,
+                   pubkey: ValidatorPubKey): string =
+  host.validatorsDir.gasLimitPath(pubkey)
+
 proc removeFeeRecipientFile*(host: KeymanagerHost,
                              pubkey: ValidatorPubKey): Result[void, string] =
   let path = host.feeRecipientPath(pubkey)
+  if fileExists(path):
+    let res = io2.removeFile(path)
+    if res.isErr:
+      return err res.error.ioErrorMsg
+
+  return ok()
+
+proc removeGasLimitFile*(host: KeymanagerHost,
+                         pubkey: ValidatorPubKey): Result[void, string] =
+  let path = host.gasLimitPath(pubkey)
   if fileExists(path):
     let res = io2.removeFile(path)
     if res.isErr:
@@ -1322,20 +1356,38 @@ proc setFeeRecipient*(host: KeymanagerHost, pubkey: ValidatorPubKey, feeRecipien
   io2.writeFile(validatorKeystoreDir / FeeRecipientFilename, $feeRecipient)
     .mapErr(proc(e: auto): string = "Failed to write fee recipient file: " & $e)
 
+proc setGasLimit*(host: KeymanagerHost,
+                  pubkey: ValidatorPubKey,
+                  gasLimit: uint64): Result[void, string] =
+  let validatorKeystoreDir = host.validatorKeystoreDir(pubkey)
+
+  ? secureCreatePath(validatorKeystoreDir).mapErr(proc(e: auto): string =
+    "Could not create wallet directory [" & validatorKeystoreDir & "]: " & $e)
+
+  io2.writeFile(validatorKeystoreDir / GasLimitFilename, $gasLimit)
+    .mapErr(proc(e: auto): string = "Failed to write gas limit file: " & $e)
+
 proc getSuggestedFeeRecipient*(
     host: KeymanagerHost,
-    pubkey: ValidatorPubKey): Result[Eth1Address, FeeRecipientStatus] =
+    pubkey: ValidatorPubKey): Result[Eth1Address, ValidatorConfigFileStatus] =
   host.validatorsDir.getSuggestedFeeRecipient(pubkey, host.defaultFeeRecipient)
 
-proc addLocalValidator*(host: KeymanagerHost, keystore: KeystoreData) =
+proc getSuggestedGasLimit*(
+    host: KeymanagerHost,
+    pubkey: ValidatorPubKey): Result[uint64, ValidatorConfigFileStatus] =
+  host.validatorsDir.getSuggestedGasLimit(pubkey, host.defaultGasLimit)
+
+proc addValidator*(host: KeymanagerHost, keystore: KeystoreData) =
   let
-    data = host.getValidatorData(keystore.pubkey)
     feeRecipient = host.getSuggestedFeeRecipient(keystore.pubkey).valueOr(
       host.defaultFeeRecipient)
+    gasLimit = host.getSuggestedGasLimit(keystore.pubkey).valueOr(
+      host.defaultGasLimit)
+    v = host.validatorPool[].addValidator(keystore, feeRecipient, gasLimit)
 
-  let v = host.validatorPool[].addLocalValidator(keystore, feeRecipient)
-  if data.isSome():
-    v.updateValidator(data.get().index, data.get().validator.activation_epoch)
+  if not isNil(host.getValidatorAndIdxFn):
+    let data = host.getValidatorAndIdxFn(keystore.pubkey)
+    v.updateValidator(data)
 
 proc generateDeposits*(cfg: RuntimeConfig,
                        rng: var HmacDrbgContext,
@@ -1358,6 +1410,14 @@ proc generateDeposits*(cfg: RuntimeConfig,
   defer: burnMem(baseKey)
   baseKey = deriveChildKey(baseKey, baseKeyPath)
 
+  var
+    salt = rng.generateKeystoreSalt()
+    password = KeystorePass.init ncrutils.toHex(rng.generateBytes(32))
+
+  defer:
+    burnMem(salt)
+    burnMem(password)
+
   let localValidatorsCount = totalNewValidators - int(remoteValidatorsCount)
   for i in 0 ..< localValidatorsCount:
     let validatorIdx = firstValidatorIdx + i
@@ -1372,12 +1432,10 @@ proc generateDeposits*(cfg: RuntimeConfig,
     derivedKey = deriveChildKey(derivedKey, 0) # This is the signing key
     let signingPubKey = derivedKey.toPubKey
 
-    var password = KeystorePass.init ncrutils.toHex(rng.generateBytes(32))
-    defer: burnMem(password)
     ? saveKeystore(rng, validatorsDir, secretsDir,
                    derivedKey, signingPubKey,
                    makeKeyPath(validatorIdx, signingKeyKind), password.str,
-                   mode)
+                   salt, mode)
 
     deposits.add prepareDeposit(
       cfg, withdrawalPubKey, derivedKey, signingPubKey)
@@ -1402,7 +1460,7 @@ proc generateDeposits*(cfg: RuntimeConfig,
       error "Failed to generate distributed key: ", threshold, sharesCount
       continue
 
-    ? generateDistirbutedStore(rng,
+    ? generateDistributedStore(rng,
                                shares.get,
                                signingPubKey.toPubKey,
                                validatorIdx,
@@ -1473,10 +1531,67 @@ proc resetAttributesNoError() =
     try: stdout.resetAttributes()
     except IOError: discard
 
-proc importKeystoresFromDir*(rng: var HmacDrbgContext,
+proc importKeystoreFromFile*(
+       fileName: string
+     ): Result[ValidatorPrivKey, string] =
+  var password: string  # TODO consider using a SecretString type
+  defer: burnMem(password)
+
+  let
+    data = readAllChars(fileName).valueOr:
+      return err("Unable to read keystore file [" & ioErrorMsg(error) & "]")
+    keystore =
+      try:
+        parseKeystore(data)
+      except SerializationError as e:
+        return err("Invalid keystore file format [" &
+                   e.formatMsg(fileName) & "]")
+
+  var firstDecryptionAttempt = true
+  while true:
+    var secret: seq[byte]
+    let status = decryptCryptoField(keystore.crypto,
+                                    KeystorePass.init(password),
+                                    secret)
+    case status
+    of DecryptionStatus.Success:
+      let privateKey = ValidatorPrivKey.fromRaw(secret).valueOr:
+        return err("Keystore holds invalid private key [" & $error & "]")
+      return ok(privateKey)
+    of DecryptionStatus.InvalidKeystore:
+      return err("Invalid keystore format")
+    of DecryptionStatus.InvalidPassword:
+      if firstDecryptionAttempt:
+        try:
+          const msg = "Please enter the password for decrypting '$1'"
+          echo msg % [fileName]
+        except ValueError:
+          raiseAssert "The format string above is correct"
+        firstDecryptionAttempt = false
+      else:
+        echo "The entered password was incorrect. Please try again."
+
+      if not(readPasswordInput("Password: ", password)):
+        echo "System error while entering password. Please try again."
+        if len(password) == 0: break
+
+proc importKeystoresFromDir*(rng: var HmacDrbgContext, meth: ImportMethod,
                              importedDir, validatorsDir, secretsDir: string) =
   var password: string  # TODO consider using a SecretString type
   defer: burnMem(password)
+
+  var (singleSaltPassword, singleSaltSalt) =
+    case meth
+    of ImportMethod.Normal:
+      var defaultSeq: seq[byte]
+      (KeystorePass.init(""), defaultSeq)
+    of ImportMethod.SingleSalt:
+      (KeystorePass.init(ncrutils.toHex(rng.generateBytes(32))),
+       rng.generateBytes(32))
+
+  defer:
+    burnMem(singleSaltPassword)
+    burnMem(singleSaltSalt)
 
   try:
     for file in walkDirRec(importedDir):
@@ -1515,12 +1630,23 @@ proc importKeystoresFromDir*(rng: var HmacDrbgContext,
           let privKey = ValidatorPrivKey.fromRaw(secret)
           if privKey.isOk:
             let pubkey = privKey.value.toPubKey
-            var
-              password = KeystorePass.init ncrutils.toHex(rng.generateBytes(32))
-            defer: burnMem(password)
+            var (password, salt) =
+              case meth
+              of ImportMethod.Normal:
+                var defaultSeq: seq[byte]
+                (KeystorePass.init ncrutils.toHex(rng.generateBytes(32)),
+                 defaultSeq)
+              of ImportMethod.SingleSalt:
+                (singleSaltPassword, singleSaltSalt)
+
+            defer:
+              burnMem(password)
+              burnMem(salt)
+
             let status = saveKeystore(rng, validatorsDir, secretsDir,
                                       privKey.value, pubkey,
-                                      keystore.path, password.str)
+                                      keystore.path, password.str,
+                                      salt)
             if status.isOk:
               notice "Keystore imported", file
             else:

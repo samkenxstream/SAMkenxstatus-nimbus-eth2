@@ -1,14 +1,11 @@
 # Nimbus
-# Copyright (c) 2021-2022 Status Research & Development GmbH
+# Copyright (c) 2021-2023 Status Research & Development GmbH
 # Licensed under either of
 #  * Apache License, version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or https://www.apache.org/licenses/LICENSE-2.0)
 #  * MIT license ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/licenses/MIT)
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   chronicles,
@@ -45,7 +42,7 @@ proc valid_deposit(state: var ForkyHashedBeaconState) =
   state.root = hash_tree_root(state.data)
 
 proc getTestStates*(
-    initialState: ForkedHashedBeaconState, stateFork: BeaconStateFork):
+    initialState: ForkedHashedBeaconState, consensusFork: ConsensusFork):
     seq[ref ForkedHashedBeaconState] =
   # Randomly generated slot numbers, with a jump to around
   # SLOTS_PER_HISTORICAL_ROOT to force wraparound of those
@@ -68,15 +65,15 @@ proc getTestStates*(
     info = ForkedEpochInfo()
     cfg = defaultRuntimeConfig
 
-  static: doAssert high(BeaconStateFork) == BeaconStateFork.EIP4844
-  if stateFork >= BeaconStateFork.Altair:
+  static: doAssert high(ConsensusFork) == ConsensusFork.Deneb
+  if consensusFork >= ConsensusFork.Altair:
     cfg.ALTAIR_FORK_EPOCH = 1.Epoch
-  if stateFork >= BeaconStateFork.Bellatrix:
+  if consensusFork >= ConsensusFork.Bellatrix:
     cfg.BELLATRIX_FORK_EPOCH = 2.Epoch
-  if stateFork >= BeaconStateFork.Capella:
+  if consensusFork >= ConsensusFork.Capella:
     cfg.CAPELLA_FORK_EPOCH = 3.Epoch
-  if stateFork >= BeaconStateFork.EIP4844:
-    cfg.EIP4844_FORK_EPOCH = 4.Epoch
+  if consensusFork >= ConsensusFork.Deneb:
+    cfg.DENEB_FORK_EPOCH = 4.Epoch
 
   for i, epoch in stateEpochs:
     let slot = epoch.Epoch.start_slot
@@ -89,5 +86,5 @@ proc getTestStates*(
         valid_deposit(forkyState)
     doAssert getStateField(tmpState[], slot) == slot
 
-    if tmpState[].kind == stateFork:
+    if tmpState[].kind == consensusFork:
       result.add assignClone(tmpState[])

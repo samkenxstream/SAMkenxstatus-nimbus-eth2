@@ -1,13 +1,10 @@
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   chronos, presto/client, chronicles,
@@ -55,6 +52,14 @@ proc getStateFinalityCheckpoints*(state_id: StateIdent
 proc getStateValidators*(state_id: StateIdent,
                          id: seq[ValidatorIdent]
                         ): RestResponse[GetStateValidatorsResponse] {.
+     rest, endpoint: "/eth/v1/beacon/states/{state_id}/validators",
+     meth: MethodGet.}
+  ## https://ethereum.github.io/beacon-APIs/#/Beacon/getStateValidators
+
+proc getStateValidatorsPlain*(
+       state_id: StateIdent,
+       id: seq[ValidatorIdent]
+     ): RestPlainResponse {.
      rest, endpoint: "/eth/v1/beacon/states/{state_id}/validators",
      meth: MethodGet.}
   ## https://ethereum.github.io/beacon-APIs/#/Beacon/getStateValidators
@@ -146,7 +151,14 @@ proc publishBlindedBlock*(body: altair.SignedBeaconBlock): RestPlainResponse {.
      meth: MethodPost.}
   ## https://ethereum.github.io/beacon-APIs/#/Beacon/publishBlindedBlock
 
-proc publishBlindedBlock*(body: SignedBlindedBeaconBlock): RestPlainResponse {.
+proc publishBlindedBlock*(body: bellatrix_mev.SignedBlindedBeaconBlock):
+       RestPlainResponse {.
+     rest, endpoint: "/eth/v1/beacon/blinded_blocks",
+     meth: MethodPost.}
+  ## https://ethereum.github.io/beacon-APIs/#/Beacon/publishBlindedBlock
+
+proc publishBlindedBlock*(body: capella_mev.SignedBlindedBeaconBlock):
+       RestPlainResponse {.
      rest, endpoint: "/eth/v1/beacon/blinded_blocks",
      meth: MethodPost.}
   ## https://ethereum.github.io/beacon-APIs/#/Beacon/publishBlindedBlock
@@ -216,6 +228,11 @@ proc getBlockV2*(client: RestClientRef, block_id: BlockIdent,
       raiseRestResponseError(resp)
 
 proc getBlockRoot*(block_id: BlockIdent): RestResponse[GetBlockRootResponse] {.
+     rest, endpoint: "/eth/v1/beacon/blocks/{block_id}/root",
+     meth: MethodGet.}
+  ## https://ethereum.github.io/beacon-APIs/#/Beacon/getBlockRoot
+
+proc getBlockRootPlain*(block_id: BlockIdent): RestPlainResponse {.
      rest, endpoint: "/eth/v1/beacon/blocks/{block_id}/root",
      meth: MethodGet.}
   ## https://ethereum.github.io/beacon-APIs/#/Beacon/getBlockRoot

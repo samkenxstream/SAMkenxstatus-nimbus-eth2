@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2022 Status Research & Development GmbH
+# Copyright (c) 2022-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   json_serialization/std/net,
@@ -126,12 +123,21 @@ type LightClientConf* = object
 
   # Execution layer
   web3Urls* {.
-    desc: "One or more execution layer Web3 provider URLs"
-    name: "web3-url" .}: seq[string]
+    desc: "One or more execution layer Engine API URLs"
+    name: "web3-url" .}: seq[EngineApiUrlConfigValue]
+
+  elUrls* {.
+    desc: "One or more execution layer Engine API URLs"
+    name: "el" .}: seq[EngineApiUrlConfigValue]
+
+  noEl* {.
+    defaultValue: false
+    desc: "Don't use an EL. The node will remain optimistically synced and won't be able to perform validator duties"
+    name: "no-el" .}: bool
 
   jwtSecret* {.
     desc: "A file containing the hex-encoded 256 bit secret key to be used for verifying/generating JWT tokens"
-    name: "jwt-secret" .}: Option[string]
+    name: "jwt-secret" .}: Option[InputFile]
 
   # Testing
   stopAtEpoch* {.
@@ -148,3 +154,13 @@ template loadJwtSecret*(
     config: LightClientConf,
     allowCreate: bool): Option[seq[byte]] =
   rng.loadJwtSecret(string(config.dataDir), config.jwtSecret, allowCreate)
+
+proc engineApiUrls*(config: LightClientConf): seq[EngineApiUrl] =
+  let elUrls = if config.noEl:
+    return newSeq[EngineApiUrl]()
+  elif config.elUrls.len == 0 and config.web3Urls.len == 0:
+    @[defaultEngineApiUrl]
+  else:
+    config.elUrls
+
+  (elUrls & config.web3Urls).toFinalEngineApiUrls(config.jwtSecret)

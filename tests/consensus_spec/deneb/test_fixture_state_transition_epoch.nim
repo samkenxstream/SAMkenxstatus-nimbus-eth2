@@ -12,20 +12,18 @@ import
   chronicles,
   # Beacon chain internals
   ../../../beacon_chain/spec/[beaconstate, presets, state_transition_epoch],
-  ../../../beacon_chain/spec/datatypes/[altair, eip4844],
+  ../../../beacon_chain/spec/datatypes/[altair, deneb],
   # Test utilities
   ../../testutil,
-  ../fixtures_utils,
+  ../fixtures_utils, ../os_ops,
   ./test_fixture_rewards,
   ../../helpers/debug_state
 
-from std/os import
-  DirSep, dirExists, fileExists, pcDir, walkDir, walkDirRec, `/`
 from std/sequtils import mapIt, toSeq
 from std/strutils import rsplit
 
 const
-  RootDir = SszTestsDir/const_preset/"eip4844"/"epoch_processing"
+  RootDir = SszTestsDir/const_preset/"deneb"/"epoch_processing"
 
   JustificationFinalizationDir = RootDir/"justification_and_finalization"
   InactivityDir =                RootDir/"inactivity_updates"
@@ -50,13 +48,13 @@ doAssert (toHashSet(mapIt(toSeq(walkDir(RootDir, relative = false)), it.path)) -
 
 template runSuite(
     suiteDir, testName: string, transitionProc: untyped): untyped =
-  suite "EF - EIP4844 - Epoch Processing - " & testName & preset():
+  suite "EF - Deneb - Epoch Processing - " & testName & preset():
     for testDir in walkDirRec(
         suiteDir / "pyspec_tests", yieldFilter = {pcDir}, checkDir = true):
       let unitTestName = testDir.rsplit(DirSep, 1)[1]
       test testName & " - " & unitTestName & preset():
         # BeaconState objects are stored on the heap to avoid stack overflow
-        type T = eip4844.BeaconState
+        type T = deneb.BeaconState
         let preState {.inject.} = newClone(parseTest(testDir/"pre.ssz_snappy", SSZ, T))
         var cache {.inject, used.} = StateCache()
         template state: untyped {.inject, used.} = preState[]

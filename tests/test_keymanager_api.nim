@@ -23,7 +23,7 @@ import
                    nimbus_beacon_node, beacon_node_status,
                    nimbus_validator_client],
   ../beacon_chain/validator_client/common,
-
+  ../ncli/ncli_testnet,
   ./testutil
 
 type
@@ -46,12 +46,15 @@ const
   validatorsDir = dataDir / "validators"
   secretsDir = dataDir / "secrets"
   depositsFile = dataDir / "deposits.json"
+  runtimeConfigFile = dataDir / "config.yaml"
   genesisFile = dataDir / "genesis.ssz"
+  depositTreeSnapshotFile = dataDir / "deposit_tree_snapshot.ssz"
   bootstrapEnrFile = dataDir / "bootstrap_node.enr"
   tokenFilePath = dataDir / "keymanager-token.txt"
   defaultBasePort = 49000
   correctTokenValue = "some secret token"
   defaultFeeRecipient = Eth1Address.fromHex("0x000000000000000000000000000000000000DEAD")
+  defaultGasLimit = 30_000_000
 
   newPrivateKeys = [
     "0x598c9b81749ba7bb8eb37781027359e3ffe87d0e1579e21c453ce22af0c05e35",
@@ -155,12 +158,24 @@ proc prepareNetwork =
   Json.saveFile(depositsFile, launchPadDeposits)
   notice "Deposit data written", filename = depositsFile
 
-  let createTestnetConf = try: BeaconNodeConf.load(cmdLine = mapIt([
-    "--data-dir=" & dataDir,
+  let runtimeConfigWritten = secureWriteFile(runtimeConfigFile, """
+ALTAIR_FORK_EPOCH: 0
+BELLATRIX_FORK_EPOCH: 0
+""")
+
+  if runtimeConfigWritten.isOk:
+    notice "Run-time config written", filename = runtimeConfigFile
+  else:
+    fatal "Failed to write run-time config", filename = runtimeConfigFile
+    quit 1
+
+  let createTestnetConf = try: ncli_testnet.CliConfig.load(cmdLine = mapIt([
     "createTestnet",
+    "--data-dir=" & dataDir,
     "--total-validators=" & $simulationDepositsCount,
     "--deposits-file=" & depositsFile,
     "--output-genesis=" & genesisFile,
+    "--output-deposit-tree-snapshot=" & depositTreeSnapshotFile,
     "--output-bootstrap-file=" & bootstrapEnrFile,
     "--netkey-file=network_key.json",
     "--insecure-netkey-password=true",
@@ -274,6 +289,7 @@ proc startBeaconNode(basePort: int) {.raises: [Defect, CatchableError].} =
     "--rest=true",
     "--rest-address=127.0.0.1",
     "--rest-port=" & $(basePort + PortKind.KeymanagerBN.ord),
+    "--no-el",
     "--keymanager=true",
     "--keymanager-address=127.0.0.1",
     "--keymanager-port=" & $(basePort + PortKind.KeymanagerBN.ord),
@@ -1082,6 +1098,168 @@ proc runTests(keymanager: KeymanagerToTest) {.async.} =
       let finalResultFromApi = await client.listFeeRecipient(pubkey, correctTokenValue)
       check:
         finalResultFromApi == defaultFeeRecipient
+
+  suite "Gas limit management" & testFlavour:
+    asyncTest "Missing Authorization header" & testFlavour:
+      let pubkey = ValidatorPubKey.fromHex(oldPublicKeys[0]).expect("valid key")
+
+      block:
+        let
+          response = await client.listGasLimitPlain(pubkey)
+          responseJson = Json.decode(response.data, JsonNode)
+
+        check:
+          response.status == 401
+          responseJson["message"].getStr() == InvalidAuthorizationError
+
+      block:
+        let
+          response = await client.setGasLimitPlain(
+            pubkey,
+            default SetGasLimitRequest)
+          responseJson = Json.decode(response.data, JsonNode)
+
+        check:
+          response.status == 401
+          responseJson["message"].getStr() == InvalidAuthorizationError
+
+      block:
+        let
+          response = await client.deleteGasLimitPlain(pubkey, EmptyBody())
+          responseJson = Json.decode(response.data, JsonNode)
+
+        check:
+          response.status == 401
+          responseJson["message"].getStr() == InvalidAuthorizationError
+
+    asyncTest "Invalid Authorization Header" & testFlavour:
+      let pubkey = ValidatorPubKey.fromHex(oldPublicKeys[0]).expect("valid key")
+
+      block:
+        let
+          response = await client.listGasLimitPlain(
+            pubkey,
+            extraHeaders = @[("Authorization", "UnknownAuthScheme X")])
+          responseJson = Json.decode(response.data, JsonNode)
+
+        check:
+          response.status == 401
+          responseJson["message"].getStr() == InvalidAuthorizationError
+
+      block:
+        let
+          response = await client.setGasLimitPlain(
+            pubkey,
+            default SetGasLimitRequest,
+            extraHeaders = @[("Authorization", "UnknownAuthScheme X")])
+          responseJson = Json.decode(response.data, JsonNode)
+
+        check:
+          response.status == 401
+          responseJson["message"].getStr() == InvalidAuthorizationError
+
+
+      block:
+        let
+          response = await client.deleteGasLimitPlain(
+            pubkey,
+            EmptyBody(),
+            extraHeaders = @[("Authorization", "UnknownAuthScheme X")])
+          responseJson = Json.decode(response.data, JsonNode)
+
+        check:
+          response.status == 401
+          responseJson["message"].getStr() == InvalidAuthorizationError
+
+    asyncTest "Invalid Authorization Token" & testFlavour:
+      let pubkey = ValidatorPubKey.fromHex(oldPublicKeys[0]).expect("valid key")
+
+      block:
+        let
+          response = await client.listGasLimitPlain(
+            pubkey,
+            extraHeaders = @[("Authorization", "Bearer InvalidToken")])
+          responseJson = Json.decode(response.data, JsonNode)
+
+        check:
+          response.status == 403
+          responseJson["message"].getStr() == InvalidAuthorizationError
+
+      block:
+        let
+          response = await client.setGasLimitPlain(
+            pubkey,
+            default SetGasLimitRequest,
+            extraHeaders = @[("Authorization", "Bearer InvalidToken")])
+          responseJson = Json.decode(response.data, JsonNode)
+
+        check:
+          response.status == 403
+          responseJson["message"].getStr() == InvalidAuthorizationError
+
+      block:
+        let
+          response = await client.deleteGasLimitPlain(
+            pubkey,
+            EmptyBody(),
+            extraHeaders = @[("Authorization", "Bearer InvalidToken")])
+          responseJson = Json.decode(response.data, JsonNode)
+
+        check:
+          response.status == 403
+          responseJson["message"].getStr() == InvalidAuthorizationError
+
+    asyncTest "Obtaining the gas limit of a missing validator returns 404" & testFlavour:
+      let
+        pubkey = ValidatorPubKey.fromHex(unusedPublicKeys[0]).expect("valid key")
+        response = await client.listGasLimitPlain(
+          pubkey,
+          extraHeaders = @[("Authorization", "Bearer " & correctTokenValue)])
+
+      check:
+        response.status == 404
+
+    asyncTest "Setting the gas limit on a missing validator creates a record for it" & testFlavour:
+      let
+        pubkey = ValidatorPubKey.fromHex(unusedPublicKeys[1]).expect("valid key")
+        gasLimit = 20_000_000'u64
+
+      await client.setGasLimit(pubkey, gasLimit, correctTokenValue)
+      let resultFromApi = await client.listGasLimit(pubkey, correctTokenValue)
+
+      check:
+        resultFromApi == gasLimit
+
+    asyncTest "Obtaining the gas limit of an unconfigured validator returns the suggested default" & testFlavour:
+      let
+        pubkey = ValidatorPubKey.fromHex(oldPublicKeys[0]).expect("valid key")
+        resultFromApi = await client.listGasLimit(pubkey, correctTokenValue)
+
+      check:
+        resultFromApi == defaultGasLimit
+
+    asyncTest "Configuring the gas limit" & testFlavour:
+      let
+        pubkey = ValidatorPubKey.fromHex(oldPublicKeys[1]).expect("valid key")
+        firstGasLimit = 40_000_000'u64
+
+      await client.setGasLimit(pubkey, firstGasLimit, correctTokenValue)
+
+      let firstResultFromApi = await client.listGasLimit(pubkey, correctTokenValue)
+      check:
+        firstResultFromApi == firstGasLimit
+
+      let secondGasLimit = 50_000_000'u64
+      await client.setGasLimit(pubkey, secondGasLimit, correctTokenValue)
+
+      let secondResultFromApi = await client.listGasLimit(pubkey, correctTokenValue)
+      check:
+        secondResultFromApi == secondGasLimit
+
+      await client.deleteGasLimit(pubkey, correctTokenValue)
+      let finalResultFromApi = await client.listGasLimit(pubkey, correctTokenValue)
+      check:
+        finalResultFromApi == defaultGasLimit
 
   suite "ImportRemoteKeys/ListRemoteKeys/DeleteRemoteKeys" & testFlavour:
     asyncTest "Importing list of remote keys" & testFlavour:

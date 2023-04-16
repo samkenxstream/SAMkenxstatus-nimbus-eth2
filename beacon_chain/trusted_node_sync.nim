@@ -1,13 +1,10 @@
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   stew/[base10, results],
@@ -46,7 +43,7 @@ proc fetchDepositSnapshot(client: RestClientRef):
 
   return ok snapshot
 
-from ./spec/datatypes/eip4844 import asSigVerified, shortLog
+from ./spec/datatypes/deneb import asSigVerified, shortLog
 
 proc doTrustedNodeSync*(
     cfg: RuntimeConfig,
@@ -86,10 +83,10 @@ proc doTrustedNodeSync*(
             genesisRoot = genesisRoot.get()
           quit 1
         genesisStateRoot = getForkedBlockField(genesisBlock, state_root)
-        stateFork = cfg.stateForkAtEpoch(GENESIS_EPOCH)
+        consensusFork = cfg.consensusForkAtEpoch(GENESIS_EPOCH)
 
-        tmp = (ref ForkedHashedBeaconState)(kind: stateFork)
-      if not db.getState(stateFork, genesisStateRoot, tmp[], noRollback):
+        tmp = (ref ForkedHashedBeaconState)(kind: consensusFork)
+      if not db.getState(consensusFork, genesisStateRoot, tmp[], noRollback):
         error "Cannot load genesis state from database",
           genesisStateRoot
         quit 1

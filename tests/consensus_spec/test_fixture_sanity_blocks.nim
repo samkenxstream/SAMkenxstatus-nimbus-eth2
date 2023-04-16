@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -11,9 +11,9 @@ import
   chronicles,
   ../../beacon_chain/spec/datatypes/phase0,
   ../../beacon_chain/spec/state_transition,
+  ./os_ops,
   ../testutil
 
-from std/os import fileExists, walkDir, walkPattern, `/`
 from std/sequtils import toSeq
 from ../../../beacon_chain/spec/forks import
   ForkedEpochInfo, ForkedHashedBeaconState, fromSszBytes, getStateRoot, new
@@ -110,7 +110,7 @@ from ../../../beacon_chain/spec/datatypes/capella import
 runForkBlockTests(
   "capella", "Capella", capella.BeaconState, capella.SignedBeaconBlock)
 
-from ../../../beacon_chain/spec/datatypes/eip4844 import
+from ../../../beacon_chain/spec/datatypes/deneb import
   BeaconState, SignedBeaconBlock
 runForkBlockTests(
-  "eip4844", "EIP4844", eip4844.BeaconState, eip4844.SignedBeaconBlock)
+  "deneb", "Deneb", deneb.BeaconState, deneb.SignedBeaconBlock)

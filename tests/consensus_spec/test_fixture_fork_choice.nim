@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -9,7 +9,7 @@
 
 import
   # Standard library
-  std/[json, os, sequtils, strutils, tables],
+  std/[json, sequtils, strutils, tables],
   # Status libraries
   stew/results, chronicles,
   eth/keys, taskpools,
@@ -26,7 +26,7 @@ import
   yaml,
   # Test
   ../testutil, ../testdbutil,
-  ./fixtures_utils
+  ./fixtures_utils, ./os_ops
 
 # Test format described at https://github.com/ethereum/consensus-specs/tree/v1.2.0-rc.1/tests/formats/fork_choice
 # Note that our implementation has been optimized with "ProtoArray"
@@ -65,7 +65,7 @@ type
 from ../../beacon_chain/spec/datatypes/capella import
   BeaconBlock, BeaconState, SignedBeaconBlock
 
-from ../../beacon_chain/spec/datatypes/eip4844 import
+from ../../beacon_chain/spec/datatypes/deneb import
   BeaconBlock, BeaconState, SignedBeaconBlock
 
 proc initialLoad(
@@ -81,8 +81,8 @@ proc initialLoad(
       path/"anchor_block.ssz_snappy",
       SSZ, BlockType)
 
-  when BlockType is eip4844.BeaconBlock:
-    let signedBlock = ForkedSignedBeaconBlock.init(eip4844.SignedBeaconBlock(
+  when BlockType is deneb.BeaconBlock:
+    let signedBlock = ForkedSignedBeaconBlock.init(deneb.SignedBeaconBlock(
       message: blck,
       # signature: - unused as it's trusted
       root: hash_tree_root(blck)
@@ -118,16 +118,18 @@ proc initialLoad(
   let
     validatorMonitor = newClone(ValidatorMonitor.init())
     dag = ChainDAGRef.init(
-      forkedState[].kind.genesisTestRuntimeConfig, db, validatorMonitor, {})
+      forkedState[].kind.genesisTestRuntimeConfig, db, validatorMonitor,
+      {enableTestFeatures, experimental})
     fkChoice = newClone(ForkChoice.init(
       dag.getFinalizedEpochRef(),
       dag.finalizedHead.blck,
+      true,
     ))
 
   (dag, fkChoice)
 
-proc loadOps(path: string, fork: BeaconStateFork): seq[Operation] =
-  let stepsYAML = readFile(path/"steps.yaml")
+proc loadOps(path: string, fork: ConsensusFork): seq[Operation] =
+  let stepsYAML = os_ops.readFile(path/"steps.yaml")
   let steps = yaml.loadToJson(stepsYAML)
 
   result = @[]
@@ -146,38 +148,38 @@ proc loadOps(path: string, fork: BeaconStateFork): seq[Operation] =
     elif step.hasKey"block":
       let filename = step["block"].getStr()
       case fork
-      of BeaconStateFork.Phase0:
+      of ConsensusFork.Phase0:
         let blck = parseTest(
           path/filename & ".ssz_snappy",
           SSZ, phase0.SignedBeaconBlock
         )
         result.add Operation(kind: opOnBlock,
           blck: ForkedSignedBeaconBlock.init(blck))
-      of BeaconStateFork.Altair:
+      of ConsensusFork.Altair:
         let blck = parseTest(
           path/filename & ".ssz_snappy",
           SSZ, altair.SignedBeaconBlock
         )
         result.add Operation(kind: opOnBlock,
           blck: ForkedSignedBeaconBlock.init(blck))
-      of BeaconStateFork.Bellatrix:
+      of ConsensusFork.Bellatrix:
         let blck = parseTest(
           path/filename & ".ssz_snappy",
           SSZ, bellatrix.SignedBeaconBlock
         )
         result.add Operation(kind: opOnBlock,
           blck: ForkedSignedBeaconBlock.init(blck))
-      of BeaconStateFork.Capella:
+      of ConsensusFork.Capella:
         let blck = parseTest(
           path/filename & ".ssz_snappy",
           SSZ, capella.SignedBeaconBlock
         )
         result.add Operation(kind: opOnBlock,
           blck: ForkedSignedBeaconBlock.init(blck))
-      of BeaconStateFork.EIP4844:
+      of ConsensusFork.Deneb:
         let blck = parseTest(
           path/filename & ".ssz_snappy",
-          SSZ, eip4844.SignedBeaconBlock
+          SSZ, deneb.SignedBeaconBlock
         )
         result.add Operation(kind: opOnBlock,
           blck: ForkedSignedBeaconBlock.init(blck))
@@ -228,7 +230,6 @@ proc stepOnBlock(
   )
 
   # 2. Add block to DAG
-  static: doAssert high(BeaconBlockFork) == BeaconBlockFork.EIP4844
   when signedBlock is phase0.SignedBeaconBlock:
     type TrustedBlock = phase0.TrustedSignedBeaconBlock
   elif signedBlock is altair.SignedBeaconBlock:
@@ -237,8 +238,8 @@ proc stepOnBlock(
     type TrustedBlock = bellatrix.TrustedSignedBeaconBlock
   elif signedBlock is capella.SignedBeaconBlock:
     type TrustedBlock = capella.TrustedSignedBeaconBlock
-  elif signedBlock is eip4844.SignedBeaconBlock:
-    type TrustedBlock = eip4844.TrustedSignedBeaconBlock
+  elif signedBlock is deneb.SignedBeaconBlock:
+    type TrustedBlock = deneb.TrustedSignedBeaconBlock
   else:
     doAssert false, "Unknown TrustedSignedBeaconBlock fork"
 
@@ -279,7 +280,7 @@ proc stepOnBlock(
     # 4. Update DAG with new head
     var quarantine = Quarantine.init()
     let newHead = fkChoice[].get_head(dag, time).get()
-    dag.updateHead(dag.getBlockRef(newHead).get(), quarantine)
+    dag.updateHead(dag.getBlockRef(newHead).get(), quarantine, [])
     if dag.needStateCachesAndForkChoicePruning():
       dag.pruneStateCachesDAG()
       let pruneRes = fkChoice[].prune()
@@ -330,22 +331,22 @@ proc stepChecks(
     else:
       doAssert false, "Unsupported check '" & $check & "'"
 
-proc doRunTest(path: string, fork: BeaconStateFork) =
+proc doRunTest(path: string, fork: ConsensusFork) =
   let db = BeaconChainDB.new("", inMemory = true)
   defer:
     db.close()
 
   let stores =
     case fork
-    of BeaconStateFork.EIP4844:
-      initialLoad(path, db, eip4844.BeaconState, eip4844.BeaconBlock)
-    of BeaconStateFork.Capella:
+    of ConsensusFork.Deneb:
+      initialLoad(path, db, deneb.BeaconState, deneb.BeaconBlock)
+    of ConsensusFork.Capella:
       initialLoad(path, db, capella.BeaconState, capella.BeaconBlock)
-    of BeaconStateFork.Bellatrix:
+    of ConsensusFork.Bellatrix:
       initialLoad(path, db, bellatrix.BeaconState, bellatrix.BeaconBlock)
-    of BeaconStateFork.Altair:
+    of ConsensusFork.Altair:
       initialLoad(path, db, altair.BeaconState, altair.BeaconBlock)
-    of BeaconStateFork.Phase0:
+    of ConsensusFork.Phase0:
       initialLoad(path, db, phase0.BeaconState, phase0.BeaconBlock)
 
   var
@@ -391,7 +392,7 @@ proc doRunTest(path: string, fork: BeaconStateFork) =
     else:
       doAssert false, "Unsupported"
 
-proc runTest(testType: static[string], path: string, fork: BeaconStateFork) =
+proc runTest(testType: static[string], path: string, fork: ConsensusFork) =
   const SKIP = [
     # protoArray can handle blocks in the future gracefully
     # spec: https://github.com/ethereum/consensus-specs/blame/v1.1.3/specs/phase0/fork-choice.md#L349
@@ -411,7 +412,7 @@ proc runTest(testType: static[string], path: string, fork: BeaconStateFork) =
       # Some test files have very long paths
       skip()
     else:
-      if os.splitPath(path).tail in SKIP:
+      if os_ops.splitPath(path).tail in SKIP:
         skip()
       else:
         doRunTest(path, fork)
@@ -421,7 +422,7 @@ template fcSuite(suiteName: static[string], testPathElem: static[string]) =
     const presetPath = SszTestsDir/const_preset
     for kind, path in walkDir(presetPath, relative = true, checkDir = true):
       let testsPath = presetPath/path/testPathElem
-      if kind != pcDir or not dirExists(testsPath):
+      if kind != pcDir or not os_ops.dirExists(testsPath):
         continue
       let fork = forkForPathComponent(path).valueOr:
         raiseAssert "Unknown test fork: " & testsPath

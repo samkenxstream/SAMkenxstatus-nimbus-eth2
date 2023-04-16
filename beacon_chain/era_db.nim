@@ -1,4 +1,4 @@
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -220,7 +220,7 @@ proc verify*(f: EraFile, cfg: RuntimeConfig): Result[Eth2Digest, string] =
 
           # Batch-verification more than doubles total verification speed
           sigs.add block_signature_set(
-              getStateField(state[], fork),
+              cfg.forkAtEpoch(slot.epoch),
               getStateField(state[], genesis_validators_root), slot,
               blck[].root, cooked.get(), sig.get())
 
@@ -391,15 +391,11 @@ iterator getBlockIds*(
   while true:
     # `case` ensures we're on a fork for which the `PartialBeaconState`
     # definition is consistent
-    case db.cfg.stateForkAtEpoch(slot.epoch)
-    of BeaconStateFork.Phase0, BeaconStateFork.Altair, BeaconStateFork.Bellatrix:
+    case db.cfg.consensusForkAtEpoch(slot.epoch)
+    of ConsensusFork.Phase0 .. ConsensusFork.Deneb:
       let stateSlot = (slot.era() + 1).start_slot()
       if not getPartialState(db, historical_roots, stateSlot, state[]):
         state = nil # No `return` in iterators
-    of BeaconStateFork.Capella:
-      debugRaiseAssert $capellaImplementationMissing & ": era_db.nim: getBlockIds"
-    of BeaconStateFork.EIP4844:
-      debugRaiseAssert $eip4844ImplementationMissing & ": era_db.nim: getBlockIds"
 
     if state == nil:
       break

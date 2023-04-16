@@ -67,12 +67,13 @@ type
     attestationPool*: ref AttestationPool
     syncCommitteeMsgPool*: ref SyncCommitteeMsgPool
     lightClientPool*: ref LightClientPool
-    exitPool*: ref ExitPool
-    eth1Monitor*: Eth1Monitor
+    validatorChangePool*: ref ValidatorChangePool
+    elManager*: ELManager
     payloadBuilderRestClient*: RestClientRef
     restServer*: RestServerRef
     keymanagerHost*: ref KeymanagerHost
     keymanagerServer*: RestServerRef
+    keystoreCache*: KeystoreCacheRef
     eventBus*: EventBus
     vcProcess*: Process
     requestManager*: RequestManager
@@ -89,12 +90,12 @@ type
     restKeysCache*: Table[ValidatorPubKey, ValidatorIndex]
     validatorMonitor*: ref ValidatorMonitor
     stateTtlCache*: StateTtlCache
-    nextExchangeTransitionConfTime*: Moment
     router*: ref MessageRouter
     dynamicFeeRecipientsStore*: ref DynamicFeeRecipientsStore
     externalBuilderRegistrations*:
       Table[ValidatorPubKey, SignedValidatorRegistrationV1]
-    mergeAtEpoch*: Epoch
+    dutyValidatorCount*: int
+      ## Number of validators that we've checked for activation
 
 const
   MaxEmptySlotCount* = uint64(10*60) div SECONDS_PER_SLOT

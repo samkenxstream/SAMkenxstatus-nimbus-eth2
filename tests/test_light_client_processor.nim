@@ -25,19 +25,19 @@ suite "Light client processor" & preset():
     highPeriod = 5.SyncCommitteePeriod
   let
     cfg = block:  # Fork schedule so that each `LightClientDataFork` is covered
-      static: doAssert BeaconStateFork.high == BeaconStateFork.EIP4844
+      static: doAssert ConsensusFork.high == ConsensusFork.Deneb
       var res = defaultRuntimeConfig
       res.ALTAIR_FORK_EPOCH = 1.Epoch
       res.BELLATRIX_FORK_EPOCH = 2.Epoch
-      # $capellaImplementationMissing res.CAPELLA_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 1).Epoch
-      # $eip4844ImplementationMissing res.EIP4844_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 2).Epoch
+      res.CAPELLA_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 1).Epoch
+      res.DENEB_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 2).Epoch
       res
 
   const numValidators = SLOTS_PER_EPOCH
   let
     validatorMonitor = newClone(ValidatorMonitor.init())
     dag = ChainDAGRef.init(
-      cfg, makeTestDB(numValidators), validatorMonitor, {},
+      cfg, makeTestDB(numValidators, cfg = cfg), validatorMonitor, {},
       lcDataConfig = LightClientDataConfig(
         serve: true,
         importMode: LightClientDataImportMode.OnlyNew))
@@ -51,23 +51,23 @@ suite "Light client processor" & preset():
                                attested = true, syncCommitteeRatio, cfg):
       let added =
         case blck.kind
-        of BeaconBlockFork.Phase0:
+        of ConsensusFork.Phase0:
           const nilCallback = OnPhase0BlockAdded(nil)
           dag.addHeadBlock(verifier, blck.phase0Data, nilCallback)
-        of BeaconBlockFork.Altair:
+        of ConsensusFork.Altair:
           const nilCallback = OnAltairBlockAdded(nil)
           dag.addHeadBlock(verifier, blck.altairData, nilCallback)
-        of BeaconBlockFork.Bellatrix:
+        of ConsensusFork.Bellatrix:
           const nilCallback = OnBellatrixBlockAdded(nil)
           dag.addHeadBlock(verifier, blck.bellatrixData, nilCallback)
-        of BeaconBlockFork.Capella:
+        of ConsensusFork.Capella:
           const nilCallback = OnCapellaBlockAdded(nil)
           dag.addHeadBlock(verifier, blck.capellaData, nilCallback)
-        of BeaconBlockFork.EIP4844:
-          const nilCallback = OnEIP4844BlockAdded(nil)
-          dag.addHeadBlock(verifier, blck.eip4844Data, nilCallback)
+        of ConsensusFork.Deneb:
+          const nilCallback = OnDenebBlockAdded(nil)
+          dag.addHeadBlock(verifier, blck.denebData, nilCallback)
       doAssert added.isOk()
-      dag.updateHead(added[], quarantine[])
+      dag.updateHead(added[], quarantine[], [])
 
   addBlocks(SLOTS_PER_EPOCH, 0.82)
   let
@@ -151,13 +151,8 @@ suite "Light client processor" & preset():
         applyPeriodWithSupermajority(period)
 
       # Reduce stack size by making this a `proc`
-      proc applyPeriodWithoutSupermajority(period: SyncCommitteePeriod) =
-        let update = newClone(dag.getLightClientUpdateForPeriod(period))
-        check update[].kind > LightClientDataFork.None
-        withForkyUpdate(update[]):
-          when lcDataFork > LightClientDataFork.None:
-            setTimeToSlot(forkyUpdate.signature_slot)
-
+      proc applyPeriodWithoutSupermajority(
+          period: SyncCommitteePeriod, update: ref ForkedLightClientUpdate) =
         for i in 0 ..< 2:
           res = processor[].storeObject(
             MsgSource.gossip, getBeaconTime(), update[])
@@ -198,7 +193,8 @@ suite "Light client processor" & preset():
                   forkyStore.best_valid_update.isSome
                   not forkyStore.best_valid_update.get.matches(forkyUpdate)
 
-          proc applyDuplicate() = # Reduce stack size by making this a `proc`
+          # Reduce stack size by making this a `proc`
+          proc applyDuplicate(update: ref ForkedLightClientUpdate) =
             res = processor[].storeObject(
               MsgSource.gossip, getBeaconTime(), update[])
             check update[].kind <= store[].kind
@@ -226,10 +222,10 @@ suite "Light client processor" & preset():
                     forkyStore.best_valid_update.isSome
                     not forkyStore.best_valid_update.get.matches(forkyUpdate)
 
-          applyDuplicate()
+          applyDuplicate(update)
           time += chronos.minutes(15)
           for _ in 0 ..< 150:
-            applyDuplicate()
+            applyDuplicate(update)
             time += chronos.seconds(5)
           time += chronos.minutes(15)
 
@@ -272,6 +268,16 @@ suite "Light client processor" & preset():
                   res.error == VerifierError.MissingParent
                   forkyStore.best_valid_update.isSome
                   not forkyStore.best_valid_update.get.matches(forkyUpdate)
+
+      for period in lastPeriodWithSupermajority + 1 .. highPeriod:
+        let update = newClone(dag.getLightClientUpdateForPeriod(period))
+        check update[].kind > LightClientDataFork.None
+        withForkyUpdate(update[]):
+          when lcDataFork > LightClientDataFork.None:
+            setTimeToSlot(forkyUpdate.signature_slot)
+
+        applyPeriodWithoutSupermajority(period, update)
+
         if finalizationMode == LightClientFinalizationMode.Optimistic:
           withForkyStore(store[]):
             when lcDataFork > LightClientDataFork.None:
@@ -286,9 +292,6 @@ suite "Light client processor" & preset():
                 update[].migratingToDataFork(lcDataFork))
               template forkyUpdate: untyped = upgraded[].forky(lcDataFork)
               check forkyStore.finalized_header != forkyUpdate.attested_header
-
-      for period in lastPeriodWithSupermajority + 1 .. highPeriod:
-        applyPeriodWithoutSupermajority(period)
 
       var oldFinalized {.noinit.}: ForkedLightClientHeader
       withForkyStore(store[]):

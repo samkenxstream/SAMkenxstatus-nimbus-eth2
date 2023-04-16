@@ -11,29 +11,50 @@
 # in the API which may lead to incompatibilities between clients - tread
 # carefully!
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   std/json,
   stew/base10, web3/ethtypes,
   ".."/forks,
-  ".."/datatypes/[phase0, altair, bellatrix, eip4844],
-  ".."/mev/bellatrix_mev
+  ".."/datatypes/[phase0, altair, bellatrix, deneb],
+  ".."/mev/[bellatrix_mev, capella_mev]
 
 from ".."/datatypes/capella import BeaconBlockBody
 
-export forks, phase0, altair, bellatrix, capella, bellatrix_mev
+export forks, phase0, altair, bellatrix, capella, bellatrix_mev, capella_mev
 
 const
   # https://github.com/ethereum/eth2.0-APIs/blob/master/apis/beacon/states/validator_balances.yaml#L17
   # https://github.com/ethereum/eth2.0-APIs/blob/master/apis/beacon/states/validators.yaml#L17
-  MaximumValidatorIds* = 16384
+  # Maximum number of validators that can be served by the REST server in one
+  # request, if the number of validator exceeds this value REST server
+  # will return HTTP error 400.
+  ServerMaximumValidatorIds* = 16384
+
+  # Maximum number of validators that can be sent in single request by
+  # validator client (VC).
+  # NOTE: This value depend on beacon node's `rest-max-headers-size`
+  # configuration option.
+  #
+  # Size of public key in HTTP request could be calculated by formula -
+  # bytes48 * 2 + len("0x") + len(",") = 99 bytes.
+  # So 1024 keys will occupy 101,376 bytes. Default value for HTTP headers size
+  # is 128Kb = 131,072 bytes.
+  ClientMaximumValidatorIds* = 1024
+
+  # https://github.com/ethereum/beacon-APIs/blob/master/apis/validator/duties/attester.yaml#L32
+  # https://github.com/ethereum/beacon-APIs/blob/master/apis/validator/duties/sync.yaml#L16
+  # Maximum number of validator ids sent with validator client's duties
+  # requests. Validator ids are sent in decimal encoding with comma, so
+  # number of ids should not exceed beacon node's `rest-max-body-size`.
+  DutiesMaximumValidatorIds* = 16384
 
 const
   preferSSZ* = "application/octet-stream,application/json;q=0.9"
+
+static:
+  doAssert(ClientMaximumValidatorIds <= ServerMaximumValidatorIds)
 
 type
   EventTopic* {.pure.} = enum
@@ -256,6 +277,26 @@ type
     index*: ValidatorIndex
     is_live*: bool
 
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.2/specs/capella/beacon-chain.md#executionpayload
+  RestExecutionPayload* = object
+    parent_hash*: Eth2Digest
+    fee_recipient*: ExecutionAddress  # 'beneficiary' in the yellow paper
+    state_root*: Eth2Digest
+    receipts_root*: Eth2Digest # 'receipts root' in the yellow paper
+    logs_bloom*: BloomLogs
+    prev_randao*: Eth2Digest  # 'difficulty' in the yellow paper
+    block_number*: uint64  # 'number' in the yellow paper
+    gas_limit*: uint64
+    gas_used*: uint64
+    timestamp*: uint64
+    extra_data*: List[byte, MAX_EXTRA_DATA_BYTES]
+    base_fee_per_gas*: UInt256
+
+    # Extra payload fields
+    block_hash*: Eth2Digest # Hash of execution block
+    transactions*: List[Transaction, MAX_TRANSACTIONS_PER_PAYLOAD]
+    withdrawals*: Option[List[Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD]]  # [New in Capella]
+
   PrepareBeaconProposer* = object
     validator_index*: ValidatorIndex
     fee_recipient*: Eth1Address
@@ -265,15 +306,15 @@ type
   RestPublishedBeaconBlock* = distinct ForkedBeaconBlock
 
   RestPublishedBeaconBlockBody* = object
-    case kind*: BeaconBlockFork
-    of BeaconBlockFork.Phase0:    phase0Body*:    phase0.BeaconBlockBody
-    of BeaconBlockFork.Altair:    altairBody*:    altair.BeaconBlockBody
-    of BeaconBlockFork.Bellatrix: bellatrixBody*: bellatrix.BeaconBlockBody
-    of BeaconBlockFork.Capella:   capellaBody*:   capella.BeaconBlockBody
-    of BeaconBlockFork.EIP4844:   eip4844Body*: eip4844.BeaconBlockBody
+    case kind*: ConsensusFork
+    of ConsensusFork.Phase0:    phase0Body*:    phase0.BeaconBlockBody
+    of ConsensusFork.Altair:    altairBody*:    altair.BeaconBlockBody
+    of ConsensusFork.Bellatrix: bellatrixBody*: bellatrix.BeaconBlockBody
+    of ConsensusFork.Capella:   capellaBody*:   capella.BeaconBlockBody
+    of ConsensusFork.Deneb:     denebBody*:     deneb.BeaconBlockBody
 
   RestSpec* = object
-    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/presets/mainnet/phase0.yaml
+    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.3/presets/mainnet/phase0.yaml
     MAX_COMMITTEES_PER_SLOT*: uint64
     TARGET_COMMITTEE_SIZE*: uint64
     MAX_VALIDATORS_PER_COMMITTEE*: uint64
@@ -308,7 +349,7 @@ type
     MAX_DEPOSITS*: uint64
     MAX_VOLUNTARY_EXITS*: uint64
 
-    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/presets/mainnet/altair.yaml
+    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/presets/mainnet/altair.yaml
     INACTIVITY_PENALTY_QUOTIENT_ALTAIR*: uint64
     MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR*: uint64
     PROPORTIONAL_SLASHING_MULTIPLIER_ALTAIR*: uint64
@@ -317,7 +358,7 @@ type
     MIN_SYNC_COMMITTEE_PARTICIPANTS*: uint64
     UPDATE_TIMEOUT*: uint64
 
-    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/presets/mainnet/bellatrix.yaml
+    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/presets/mainnet/bellatrix.yaml
     INACTIVITY_PENALTY_QUOTIENT_BELLATRIX*: uint64
     MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX*: uint64
     PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX*: uint64
@@ -342,8 +383,8 @@ type
     BELLATRIX_FORK_EPOCH*: uint64
     CAPELLA_FORK_VERSION*: Version
     CAPELLA_FORK_EPOCH*: uint64
-    EIP4844_FORK_VERSION*: Version
-    EIP4844_FORK_EPOCH*: uint64
+    DENEB_FORK_VERSION*: Version
+    DENEB_FORK_EPOCH*: uint64
     SECONDS_PER_SLOT*: uint64
     SECONDS_PER_ETH1_BLOCK*: uint64
     MIN_VALIDATOR_WITHDRAWABILITY_DELAY*: uint64
@@ -359,7 +400,7 @@ type
     DEPOSIT_NETWORK_ID*: uint64
     DEPOSIT_CONTRACT_ADDRESS*: Eth1Address
 
-    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/beacon-chain.md#constants
+    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.3/specs/phase0/beacon-chain.md#constants
     # GENESIS_SLOT
     # GENESIS_EPOCH
     # FAR_FUTURE_EPOCH
@@ -377,7 +418,7 @@ type
     DOMAIN_SELECTION_PROOF*: DomainType
     DOMAIN_AGGREGATE_AND_PROOF*: DomainType
 
-    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/altair/beacon-chain.md#constants
+    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.3/specs/altair/beacon-chain.md#constants
     TIMELY_SOURCE_FLAG_INDEX*: byte
     TIMELY_TARGET_FLAG_INDEX*: byte
     TIMELY_HEAD_FLAG_INDEX*: byte
@@ -392,7 +433,7 @@ type
     DOMAIN_CONTRIBUTION_AND_PROOF*: DomainType
     # PARTICIPATION_FLAG_WEIGHTS
 
-    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#constants
+    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#constants
     TARGET_AGGREGATORS_PER_COMMITTEE*: uint64
     RANDOM_SUBNETS_PER_VALIDATOR*: uint64
     EPOCHS_PER_RANDOM_SUBNET_SUBSCRIPTION*: uint64
@@ -468,6 +509,11 @@ type
   DataRootEnclosedObject*[T] = object
     dependent_root*: Eth2Digest
     data*: T
+    execution_optimistic*: Option[bool]
+
+  DataOptimisticObject*[T] = object
+    data*: T
+    execution_optimistic*: Option[bool]
 
   ForkedSignedBlockHeader* = object
     message*: uint32 # message offset
@@ -566,14 +612,8 @@ type
         serializedFieldName: "validator_registration".}:
           Web3SignerValidatorRegistration
 
-  GetBlockResponse* = DataEnclosedObject[phase0.SignedBeaconBlock]
-  GetStateResponse* = DataEnclosedObject[phase0.BeaconState]
   GetBlockV2Response* = ForkedSignedBeaconBlock
   GetStateV2Response* = ref ForkedHashedBeaconState
-  GetPhase0StateSszResponse* = phase0.BeaconState
-  GetAltairStateSszResponse* = altair.BeaconState
-  GetPhase0BlockSszResponse* = phase0.SignedBeaconBlock
-  GetAltairBlockSszResponse* = altair.SignedBeaconBlock
 
   RestRoot* = object
     root*: Eth2Digest
@@ -585,14 +625,15 @@ type
   GetBlockAttestationsResponse* = DataEnclosedObject[seq[Attestation]]
   GetBlockHeaderResponse* = DataEnclosedObject[RestBlockHeaderInfo]
   GetBlockHeadersResponse* = DataEnclosedObject[seq[RestBlockHeaderInfo]]
-  GetBlockRootResponse* = DataEnclosedObject[RestRoot]
+  GetBlockRootResponse* = DataOptimisticObject[RestRoot]
   GetDebugChainHeadsResponse* = DataEnclosedObject[seq[RestChainHead]]
   GetDepositContractResponse* = DataEnclosedObject[RestDepositContract]
   GetDepositSnapshotResponse* = DataEnclosedObject[RestDepositSnapshot]
   GetEpochCommitteesResponse* = DataEnclosedObject[seq[RestBeaconStatesCommittees]]
   GetForkScheduleResponse* = DataEnclosedObject[seq[Fork]]
   GetGenesisResponse* = DataEnclosedObject[RestGenesis]
-  GetHeaderResponse* = DataVersionEnclosedObject[SignedBuilderBid]
+  GetHeaderResponseBellatrix* = DataVersionEnclosedObject[bellatrix_mev.SignedBuilderBid]
+  GetHeaderResponseCapella* = DataVersionEnclosedObject[capella_mev.SignedBuilderBid]
   GetNetworkIdentityResponse* = DataEnclosedObject[RestNetworkIdentity]
   GetPeerCountResponse* = DataMetaEnclosedObject[RestPeerCount]
   GetPeerResponse* = DataMetaEnclosedObject[RestNodePeer]
@@ -606,20 +647,20 @@ type
   GetSpecVCResponse* = DataEnclosedObject[RestSpecVC]
   GetStateFinalityCheckpointsResponse* = DataEnclosedObject[RestBeaconStatesFinalityCheckpoints]
   GetStateForkResponse* = DataEnclosedObject[Fork]
-  GetStateRootResponse* = DataEnclosedObject[RestRoot]
+  GetStateRootResponse* = DataOptimisticObject[RestRoot]
   GetStateValidatorBalancesResponse* = DataEnclosedObject[seq[RestValidatorBalance]]
   GetStateValidatorResponse* = DataEnclosedObject[RestValidator]
-  GetStateValidatorsResponse* = DataEnclosedObject[seq[RestValidator]]
-  GetSyncCommitteeDutiesResponse* = DataEnclosedObject[seq[RestSyncCommitteeDuty]]
+  GetStateValidatorsResponse* = DataOptimisticObject[seq[RestValidator]]
+  GetSyncCommitteeDutiesResponse* = DataOptimisticObject[seq[RestSyncCommitteeDuty]]
   GetSyncingStatusResponse* = DataEnclosedObject[RestSyncInfo]
   GetVersionResponse* = DataEnclosedObject[RestNodeVersion]
   GetEpochSyncCommitteesResponse* = DataEnclosedObject[RestEpochSyncCommittee]
   ProduceAttestationDataResponse* = DataEnclosedObject[AttestationData]
-  ProduceBlockResponse* = DataEnclosedObject[phase0.BeaconBlock]
   ProduceBlockResponseV2* = ForkedBeaconBlock
   ProduceBlindedBlockResponse* = ForkedBlindedBeaconBlock
   ProduceSyncCommitteeContributionResponse* = DataEnclosedObject[SyncCommitteeContribution]
-  SubmitBlindedBlockResponse* = DataEnclosedObject[bellatrix.ExecutionPayload]
+  SubmitBlindedBlockResponseBellatrix* = DataEnclosedObject[bellatrix.ExecutionPayload]
+  SubmitBlindedBlockResponseCapella* = DataEnclosedObject[capella.ExecutionPayload]
   GetValidatorsActivityResponse* = DataEnclosedObject[seq[RestActivityItem]]
   GetValidatorsLivenessResponse* = DataEnclosedObject[seq[RestLivenessItem]]
 

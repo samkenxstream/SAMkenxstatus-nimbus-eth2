@@ -227,11 +227,7 @@ proc installNimbusApiHandlers*(router: var RestRouter, node: BeaconNode) =
 
   router.api(MethodGet, "/nimbus/v1/eth1/chain") do (
     ) -> RestApiResponse:
-    let res =
-      if not(isNil(node.eth1Monitor)):
-        mapIt(node.eth1Monitor.depositChainBlocks, it)
-      else:
-        @[]
+    let res = mapIt(node.elManager.eth1ChainBlocks, it)
     return RestApiResponse.jsonResponse(res)
 
   router.api(MethodGet, "/nimbus/v1/eth1/proposal_data") do (
@@ -241,8 +237,12 @@ proc installNimbusApiHandlers*(router: var RestRouter, node: BeaconNode) =
       block:
         let res = node.getSyncedHead(wallSlot)
         if res.isErr():
+          return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError,
+                                           $res.error())
+        let tres = res.get()
+        if tres.optimistic:
           return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError)
-        res.get()
+        tres.head
     let proposalState = assignClone(node.dag.headState)
     node.dag.withUpdatedState(
         proposalState[],

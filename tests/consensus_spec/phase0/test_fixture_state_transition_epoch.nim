@@ -14,11 +14,10 @@ import
   ../../../beacon_chain/spec/datatypes/phase0,
   # Test utilities
   ../../testutil,
-  ../fixtures_utils,
+  ../fixtures_utils, ../os_ops,
   ./test_fixture_rewards,
   ../../helpers/debug_state
 
-from std/os import DirSep, fileExists, pcDir, walkDir, walkDirRec, `/`
 from std/sequtils import mapIt, toSeq
 from std/strutils import rsplit
 
@@ -54,7 +53,7 @@ template runSuite(suiteDir, testName: string, transitionProc: untyped): untyped 
         type T = phase0.BeaconState
         let preState {.inject.} = newClone(parseTest(testDir/"pre.ssz_snappy", SSZ, T))
         var cache {.inject, used.} = StateCache()
-        var info {.inject.}: EpochInfo
+        var info {.inject.}: phase0.EpochInfo
         template state: untyped {.inject, used.} = preState[]
         template cfg: untyped {.inject, used.} = defaultRuntimeConfig
         init(info, preState[])

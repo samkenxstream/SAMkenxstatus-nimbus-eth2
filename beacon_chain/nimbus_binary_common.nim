@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 # Common routines for a BeaconNode and a ValidatorClient
 
@@ -22,7 +19,7 @@ import
   stew/io2,
 
   # Local modules
-  ./spec/[helpers],
+  ./spec/[helpers, keystore],
   ./spec/datatypes/base,
   "."/[beacon_clock, beacon_node_status, conf, version]
 
@@ -247,6 +244,18 @@ proc resetStdin*() =
     discard fd.tcGetAttr(attrs.addr)
     attrs.c_lflag = attrs.c_lflag or Cflag(ECHO)
     discard fd.tcSetAttr(TCSANOW, attrs.addr)
+
+proc runKeystoreCachePruningLoop*(cache: KeystoreCacheRef) {.async.} =
+  while true:
+    let exitLoop =
+      try:
+        await sleepAsync(60.seconds)
+        false
+      except CatchableError:
+        cache.clear()
+        true
+    if exitLoop: break
+    cache.pruneExpiredKeys()
 
 proc runSlotLoop*[T](node: T, startTime: BeaconTime,
                      slotProc: SlotStartProc[T]) {.async.} =

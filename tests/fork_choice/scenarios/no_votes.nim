@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 # import ../interpreter # included to be able to use "suite"
 
@@ -41,7 +38,9 @@ func setup_no_votes(): tuple[fork_choice: ForkChoiceBackend, ops: seq[Operation]
   #       2
   result.ops.add Operation(
     kind: ProcessBlock,
-    root: fakeHash(2),
+    bid: BlockId(
+      slot: Epoch(3).start_slot + 2,
+      root: fakeHash(2)),
     parent_root: GenesisRoot,
     blk_checkpoints: FinalityCheckpoints(
       justified: Checkpoint(root: GenesisRoot, epoch: Epoch(1)),
@@ -67,7 +66,9 @@ func setup_no_votes(): tuple[fork_choice: ForkChoiceBackend, ops: seq[Operation]
   #       2  1
   result.ops.add Operation(
     kind: ProcessBlock,
-    root: fakeHash(1),
+    bid: BlockId(
+      slot: Epoch(3).start_slot + 1,
+      root: fakeHash(1)),
     parent_root: GenesisRoot,
     blk_checkpoints: FinalityCheckpoints(
       justified: Checkpoint(root: GenesisRoot, epoch: Epoch(1)),
@@ -95,7 +96,9 @@ func setup_no_votes(): tuple[fork_choice: ForkChoiceBackend, ops: seq[Operation]
   #          3
   result.ops.add Operation(
     kind: ProcessBlock,
-    root: fakeHash(3),
+    bid: BlockId(
+      slot: Epoch(3).start_slot + 3,
+      root: fakeHash(3)),
     parent_root: fakeHash(1),
     blk_checkpoints: FinalityCheckpoints(
       justified: Checkpoint(root: GenesisRoot, epoch: Epoch(1)),
@@ -125,7 +128,9 @@ func setup_no_votes(): tuple[fork_choice: ForkChoiceBackend, ops: seq[Operation]
   #       4  3
   result.ops.add Operation(
     kind: ProcessBlock,
-    root: fakeHash(4),
+    bid: BlockId(
+      slot: Epoch(3).start_slot + 4,
+      root: fakeHash(4)),
     parent_root: fakeHash(2),
     blk_checkpoints: FinalityCheckpoints(
       justified: Checkpoint(root: GenesisRoot, epoch: Epoch(1)),
@@ -157,7 +162,9 @@ func setup_no_votes(): tuple[fork_choice: ForkChoiceBackend, ops: seq[Operation]
   #       5 <- justified epoch = 2
   result.ops.add Operation(
     kind: ProcessBlock,
-    root: fakeHash(5),
+    bid: BlockId(
+      slot: Epoch(4).start_slot,
+      root: fakeHash(5)),
     parent_root: fakeHash(4),
     blk_checkpoints: FinalityCheckpoints(
       justified: Checkpoint(root: fakeHash(5), epoch: Epoch(2)),
@@ -224,7 +231,9 @@ func setup_no_votes(): tuple[fork_choice: ForkChoiceBackend, ops: seq[Operation]
   #     6
   result.ops.add Operation(
     kind: ProcessBlock,
-    root: fakeHash(6),
+    bid: BlockId(
+      slot: Epoch(4).start_slot + 1,
+      root: fakeHash(6)),
     parent_root: fakeHash(5),
     blk_checkpoints: FinalityCheckpoints(
       justified: Checkpoint(root: fakeHash(5), epoch: Epoch(2)),

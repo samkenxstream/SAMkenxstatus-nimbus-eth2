@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2022 Status Research & Development GmbH
+# Copyright (c) 2022-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -40,7 +40,7 @@ proc findValidator(validators: seq[Validator], pubKey: ValidatorPubKey):
     Opt.some idx.ValidatorIndex
 
 from ../beacon_chain/spec/datatypes/capella import SignedBeaconBlock
-from ../beacon_chain/spec/datatypes/eip4844 import SignedBeaconBlock
+from ../beacon_chain/spec/datatypes/deneb import SignedBeaconBlock
 
 cli do(validatorsDir: string, secretsDir: string,
        startState: string, network: string):
@@ -57,7 +57,7 @@ cli do(validatorsDir: string, secretsDir: string,
     validatorKeys: Table[ValidatorPubKey, ValidatorPrivKey]
 
   for item in listLoadableKeystores(validatorsDir, secretsDir, true,
-                                    {KeystoreKind.Local}):
+                                    {KeystoreKind.Local}, nil):
     let
       pubkey = item.privateKey.toPubKey().toPubKey()
       idx = findValidator(getStateField(state[], validators).toSeq, pubkey)
@@ -160,15 +160,14 @@ cli do(validatorsDir: string, secretsDir: string,
           GraffitiBytes.init("insecura"),
           blockAggregates,
           @[],
-          BeaconBlockExits(),
+          BeaconBlockValidatorChanges(),
           syncAggregate,
-          default(bellatrix.ExecutionPayload),
-          (static(default(SignedBLSToExecutionChangeList))),
+          default(bellatrix.ExecutionPayloadForSigning),
           noRollback,
           cache).get()
 
       case message.kind
-      of BeaconBlockFork.Phase0:
+      of ConsensusFork.Phase0:
         blockRoot = hash_tree_root(message.phase0Data)
         let signedBlock = phase0.SignedBeaconBlock(
           message: message.phase0Data,
@@ -177,7 +176,7 @@ cli do(validatorsDir: string, secretsDir: string,
             fork, genesis_validators_root, slot, blockRoot,
             validators[proposer]).toValidatorSig())
         dump(".", signedBlock)
-      of BeaconBlockFork.Altair:
+      of ConsensusFork.Altair:
         blockRoot = hash_tree_root(message.altairData)
         let signedBlock = altair.SignedBeaconBlock(
           message: message.altairData,
@@ -186,7 +185,7 @@ cli do(validatorsDir: string, secretsDir: string,
             fork, genesis_validators_root, slot, blockRoot,
             validators[proposer]).toValidatorSig())
         dump(".", signedBlock)
-      of BeaconBlockFork.Bellatrix:
+      of ConsensusFork.Bellatrix:
         blockRoot = hash_tree_root(message.bellatrixData)
         let signedBlock = bellatrix.SignedBeaconBlock(
           message: message.bellatrixData,
@@ -195,7 +194,7 @@ cli do(validatorsDir: string, secretsDir: string,
             fork, genesis_validators_root, slot, blockRoot,
             validators[proposer]).toValidatorSig())
         dump(".", signedBlock)
-      of BeaconBlockFork.Capella:
+      of ConsensusFork.Capella:
         blockRoot = hash_tree_root(message.capellaData)
         let signedBlock = capella.SignedBeaconBlock(
           message: message.capellaData,
@@ -204,10 +203,10 @@ cli do(validatorsDir: string, secretsDir: string,
             fork, genesis_validators_root, slot, blockRoot,
             validators[proposer]).toValidatorSig())
         dump(".", signedBlock)
-      of BeaconBlockFork.EIP4844:
-        blockRoot = hash_tree_root(message.eip4844Data)
-        let signedBlock = eip4844.SignedBeaconBlock(
-          message: message.eip4844Data,
+      of ConsensusFork.Deneb:
+        blockRoot = hash_tree_root(message.denebData)
+        let signedBlock = deneb.SignedBeaconBlock(
+          message: message.denebData,
           root: blockRoot,
           signature: get_block_signature(
             fork, genesis_validators_root, slot, blockRoot,
@@ -255,7 +254,7 @@ cli do(validatorsDir: string, secretsDir: string,
 
           aggregates.add(attestation)
 
-      when stateFork >= BeaconStateFork.Altair:
+      when consensusFork >= ConsensusFork.Altair:
         let
           nextSlot = slot + 1
           pubkeys =

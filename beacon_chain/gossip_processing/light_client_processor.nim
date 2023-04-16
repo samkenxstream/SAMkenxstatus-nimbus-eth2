@@ -5,10 +5,7 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   stew/objects,
@@ -298,8 +295,7 @@ template withReportedProgress(
     obj: SomeForkedLightClientObject | Nothing, body: untyped): bool =
   block:
     let
-      oldIsInitialized =
-        self.store[].kind != LightClientDataFork.None
+      oldIsInitialized = self.store[].kind > LightClientDataFork.None
       oldNextCommitteeKnown = withForkyStore(self.store[]):
         when lcDataFork > LightClientDataFork.None:
           forkyStore.is_next_sync_committee_known
@@ -327,7 +323,7 @@ template withReportedProgress(
       didProgress = false
       didSignificantProgress = false
 
-    let newIsInitialized = self.store[].kind != LightClientDataFork.None
+    let newIsInitialized = self.store[].kind > LightClientDataFork.None
     if newIsInitialized > oldIsInitialized:
       didProgress = true
       didSignificantProgress = true
@@ -530,7 +526,7 @@ func toValidationError(
       # previously forwarded `optimistic_update`s
       errIgnore($r.error)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.0/specs/altair/light-client/sync-protocol.md#process_light_client_finality_update
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.3/specs/altair/light-client/sync-protocol.md#process_light_client_finality_update
 proc processLightClientFinalityUpdate*(
     self: var LightClientProcessor, src: MsgSource,
     finality_update: ForkedLightClientFinalityUpdate
@@ -543,7 +539,7 @@ proc processLightClientFinalityUpdate*(
     self.latestFinalityUpdate = finality_update.toOptimistic
   v
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-alpha.0/specs/altair/light-client/sync-protocol.md#process_light_client_finality_update
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.3/specs/altair/light-client/sync-protocol.md#process_light_client_finality_update
 proc processLightClientOptimisticUpdate*(
     self: var LightClientProcessor, src: MsgSource,
     optimistic_update: ForkedLightClientOptimisticUpdate

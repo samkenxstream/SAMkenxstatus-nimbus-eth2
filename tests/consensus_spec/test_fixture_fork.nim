@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2021-2022 Status Research & Development GmbH
+# Copyright (c) 2021-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -13,10 +13,8 @@ import
   ../../beacon_chain/spec/datatypes/phase0,
   # Test utilities
   ../testutil,
-  ./fixtures_utils,
+  ./fixtures_utils, ./os_ops,
   ../helpers/debug_state
-
-from std/os import walkDir, `/`
 
 proc runTest(
     BeaconStateAnte, BeaconStatePost: type, forkNameName, forkDir: static[string],
@@ -43,36 +41,36 @@ proc runTest(
 
 from ../../beacon_chain/spec/datatypes/altair import BeaconState
 
-suite "Ethereum Foundation - Altair - Fork " & preset():
+suite "EF - Altair - Fork " & preset():
   const OpForkDir =
     SszTestsDir/const_preset/"altair"/"fork"/"fork"/"pyspec_tests"
   for kind, path in walkDir(OpForkDir, relative = true, checkDir = true):
     runTest(phase0.BeaconState, altair.BeaconState, "Altair", OpForkDir,
-    upgrade_to_altair, path)
+            upgrade_to_altair, path)
 
 from ../../beacon_chain/spec/datatypes/bellatrix import BeaconState
 
-suite "Ethereum Foundation - Bellatrix - Fork " & preset():
+suite "EF - Bellatrix - Fork " & preset():
   const OpForkDir =
     SszTestsDir/const_preset/"bellatrix"/"fork"/"fork"/"pyspec_tests"
   for kind, path in walkDir(OpForkDir, relative = true, checkDir = true):
     runTest(altair.BeaconState, bellatrix.BeaconState, "Bellatrix", OpForkDir,
-    upgrade_to_bellatrix, path)
+            upgrade_to_bellatrix, path)
 
 from ../../beacon_chain/spec/datatypes/capella import BeaconState
 
-suite "Ethereum Foundation - Capella - Fork " & preset():
+suite "EF - Capella - Fork " & preset():
   const OpForkDir =
     SszTestsDir/const_preset/"capella"/"fork"/"fork"/"pyspec_tests"
   for kind, path in walkDir(OpForkDir, relative = true, checkDir = true):
     runTest(bellatrix.BeaconState, capella.BeaconState, "Capella", OpForkDir,
-    upgrade_to_capella, path)
+            upgrade_to_capella, path)
 
-from ../../beacon_chain/spec/datatypes/eip4844 import BeaconState
+from ../../beacon_chain/spec/datatypes/deneb import BeaconState
 
-suite "Ethereum Foundation - EIP4844 - Fork " & preset():
+suite "EF - Deneb - Fork " & preset():
   const OpForkDir =
-    SszTestsDir/const_preset/"eip4844"/"fork"/"fork"/"pyspec_tests"
+    SszTestsDir/const_preset/"deneb"/"fork"/"fork"/"pyspec_tests"
   for kind, path in walkDir(OpForkDir, relative = true, checkDir = true):
-    runTest(capella.BeaconState, eip4844.BeaconState, "EIP4844", OpForkDir,
-    upgrade_to_eip4844, path)
+    runTest(capella.BeaconState, deneb.BeaconState, "Deneb", OpForkDir,
+            upgrade_to_deneb, path)

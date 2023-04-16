@@ -39,10 +39,10 @@ OK: 3/3 Fail: 0/3 Skip: 0/3
 + sanity check Capella blocks [Preset: mainnet]                                              OK
 + sanity check Capella states [Preset: mainnet]                                              OK
 + sanity check Capella states, reusing buffers [Preset: mainnet]                             OK
-+ sanity check EIP4844 and cross-fork getState rollback [Preset: mainnet]                    OK
-+ sanity check EIP4844 blocks [Preset: mainnet]                                              OK
-+ sanity check EIP4844 states [Preset: mainnet]                                              OK
-+ sanity check EIP4844 states, reusing buffers [Preset: mainnet]                             OK
++ sanity check Deneb and cross-fork getState rollback [Preset: mainnet]                      OK
++ sanity check Deneb blocks [Preset: mainnet]                                                OK
++ sanity check Deneb states [Preset: mainnet]                                                OK
++ sanity check Deneb states, reusing buffers [Preset: mainnet]                               OK
 + sanity check genesis roundtrip [Preset: mainnet]                                           OK
 + sanity check phase 0 blocks [Preset: mainnet]                                              OK
 + sanity check phase 0 getState rollback [Preset: mainnet]                                   OK
@@ -161,13 +161,22 @@ OK: 2/2 Fail: 0/2 Skip: 0/2
 + Testing uints        inputs - valid                                                        OK
 ```
 OK: 10/12 Fail: 0/12 Skip: 2/12
+## EL Configuration
+```diff
++ Empty config file                                                                          OK
++ Invalid URls                                                                               OK
++ New style config files                                                                     OK
++ Old style config files                                                                     OK
++ URL parsing                                                                                OK
+```
+OK: 5/5 Fail: 0/5 Skip: 0/5
 ## Eth1 monitor
 ```diff
 + Deposits chain                                                                             OK
-+ Rewrite HTTPS Infura URLs                                                                  OK
++ Rewrite URLs                                                                               OK
 + Roundtrip engine RPC V1 and bellatrix ExecutionPayload representations                     OK
 + Roundtrip engine RPC V2 and capella ExecutionPayload representations                       OK
-+ Roundtrip engine RPC V3 and eip4844 ExecutionPayload representations                       OK
++ Roundtrip engine RPC V3 and deneb ExecutionPayload representations                         OK
 ```
 OK: 5/5 Fail: 0/5 Skip: 0/5
 ## Eth2 specific discovery tests
@@ -177,14 +186,6 @@ OK: 5/5 Fail: 0/5 Skip: 0/5
 + Subnet query after ENR update                                                              OK
 ```
 OK: 3/3 Fail: 0/3 Skip: 0/3
-## Exit pool testing suite
-```diff
-+ addExitMessage/getAttesterSlashingMessage                                                  OK
-+ addExitMessage/getProposerSlashingMessage                                                  OK
-+ addExitMessage/getVoluntaryExitMessage                                                     OK
-+ pre-pre-fork voluntary exit                                                                OK
-```
-OK: 4/4 Fail: 0/4 Skip: 0/4
 ## Fee recipient management [Beacon Node] [Preset: mainnet]
 ```diff
 + Configuring the fee recpient [Beacon Node] [Preset: mainnet]                               OK
@@ -227,6 +228,17 @@ OK: 3/3 Fail: 0/3 Skip: 0/3
 + should raise on unknown data                                                               OK
 ```
 OK: 7/7 Fail: 0/7 Skip: 0/7
+## Gas limit management [Beacon Node] [Preset: mainnet]
+```diff
++ Configuring the gas limit [Beacon Node] [Preset: mainnet]                                  OK
++ Invalid Authorization Header [Beacon Node] [Preset: mainnet]                               OK
++ Invalid Authorization Token [Beacon Node] [Preset: mainnet]                                OK
++ Missing Authorization header [Beacon Node] [Preset: mainnet]                               OK
++ Obtaining the gas limit of a missing validator returns 404 [Beacon Node] [Preset: mainnet] OK
++ Obtaining the gas limit of an unconfigured validator returns the suggested default [Beacon OK
++ Setting the gas limit on a missing validator creates a record for it [Beacon Node] [Preset OK
+```
+OK: 7/7 Fail: 0/7 Skip: 0/7
 ## Gossip fork transition
 ```diff
 + Gossip fork transition                                                                     OK
@@ -267,13 +279,6 @@ OK: 4/4 Fail: 0/4 Skip: 0/4
 + Missing Authorization header [Beacon Node] [Preset: mainnet]                               OK
 ```
 OK: 4/4 Fail: 0/4 Skip: 0/4
-## Interop
-```diff
-+ Interop genesis                                                                            OK
-+ Interop signatures                                                                         OK
-+ Mocked start private key                                                                   OK
-```
-OK: 3/3 Fail: 0/3 Skip: 0/3
 ## Key spliting
 ```diff
 + k < n                                                                                      OK
@@ -464,12 +469,10 @@ OK: 1/1 Fail: 0/1 Skip: 0/1
 ## Spec helpers
 ```diff
 + build_empty_execution_payload - Bellatrix                                                  OK
-+ build_empty_execution_payload - Capella                                                    OK
-+ build_empty_execution_payload - EIP4844                                                    OK
 + build_proof - BeaconState                                                                  OK
 + integer_squareroot                                                                         OK
 ```
-OK: 5/5 Fail: 0/5 Skip: 0/5
+OK: 3/3 Fail: 0/3 Skip: 0/3
 ## Specific field types
 ```diff
 + root update                                                                                OK
@@ -492,6 +495,7 @@ OK: 4/4 Fail: 0/4 Skip: 0/4
 ## SyncManager test suite
 ```diff
 + Process all unviable blocks                                                                OK
++ [SyncManager] groupBlobs() test                                                            OK
 + [SyncQueue#Backward] Async unordered push test                                             OK
 + [SyncQueue#Backward] Async unordered push with rewind test                                 OK
 + [SyncQueue#Backward] Good response with missing values towards end                         OK
@@ -515,18 +519,28 @@ OK: 4/4 Fail: 0/4 Skip: 0/4
 + [SyncQueue] getLastNonEmptySlot() test                                                     OK
 + [SyncQueue] hasEndGap() test                                                               OK
 ```
-OK: 23/23 Fail: 0/23 Skip: 0/23
+OK: 24/24 Fail: 0/24 Skip: 0/24
+## Type helpers
+```diff
++ BeaconBlockType                                                                            OK
+```
+OK: 1/1 Fail: 0/1 Skip: 0/1
+## Validator change pool testing suite
+```diff
++ addValidatorChangeMessage/getAttesterSlashingMessage                                       OK
++ addValidatorChangeMessage/getBlsToExecutionChange (post-capella)                           OK
++ addValidatorChangeMessage/getBlsToExecutionChange (pre-capella)                            OK
++ addValidatorChangeMessage/getProposerSlashingMessage                                       OK
++ addValidatorChangeMessage/getVoluntaryExitMessage                                          OK
++ pre-pre-fork voluntary exit                                                                OK
+```
+OK: 6/6 Fail: 0/6 Skip: 0/6
 ## Validator pool
 ```diff
-+ Activation after check                                                                     OK
-+ Doppelganger for already active validator                                                  OK
 + Doppelganger for genesis validator                                                         OK
-+ Doppelganger for validator that activates in future epoch                                  OK
-+ Doppelganger for validator that activates in previous epoch                                OK
 + Doppelganger for validator that activates in same epoch as check                           OK
-+ Future activation after check                                                              OK
 ```
-OK: 7/7 Fail: 0/7 Skip: 0/7
+OK: 2/2 Fail: 0/2 Skip: 0/2
 ## Zero signature sanity checks
 ```diff
 + SSZ serialization roundtrip of SignedBeaconBlockHeader                                     OK
@@ -621,4 +635,4 @@ OK: 2/2 Fail: 0/2 Skip: 0/2
 OK: 9/9 Fail: 0/9 Skip: 0/9
 
 ---TOTAL---
-OK: 346/351 Fail: 0/351 Skip: 5/351
+OK: 352/357 Fail: 0/357 Skip: 5/357

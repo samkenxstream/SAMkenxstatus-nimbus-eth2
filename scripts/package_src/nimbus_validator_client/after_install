@@ -1,11 +1,16 @@
-#!/bin/bash
+#!/bin/sh
 
 set -e
 
-DISTRO=$(lsb_release -si)
+DISTRO="UNKNOWN"
+if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    DISTRO="${ID}"
+fi
+
 if ! id -u nimbus > /dev/null 2>&1; then
   case $DISTRO in
-    Ubuntu|Debian)
+    Ubuntu|ubuntu|Debian|debian)
       # Debian uses `adduser` to create user...
       adduser --system --no-create-home --group nimbus
       ;;
@@ -19,4 +24,5 @@ fi
 mkdir -p /var/lib/nimbus
 chown nimbus:nimbus /var/lib/nimbus
 
-systemctl daemon-reload
+# Systems like docker containers do not have systemd.
+systemctl daemon-reload || echo "notice: systemd daemon not reloaded" >&2

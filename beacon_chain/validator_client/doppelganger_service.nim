@@ -16,7 +16,8 @@ logScope: service = ServiceName
 proc getCheckingList*(vc: ValidatorClientRef, epoch: Epoch): seq[ValidatorIndex] =
   var res: seq[ValidatorIndex]
   for validator in vc.attachedValidators[]:
-    if validator.index.isSome and validator.triggersDoppelganger(epoch):
+    if validator.index.isSome and
+        (validator.doppelCheck.isNone or validator.doppelCheck.get() < epoch):
       res.add validator.index.get()
   res
 
@@ -36,12 +37,16 @@ proc processActivities(service: DoppelgangerServiceRef, epoch: Epoch,
       let vindex = item.index
       for validator in vc.attachedValidators[]:
         if validator.index == Opt.some(vindex):
-          if item.is_live:
-            if validator.triggersDoppelganger(epoch):
-              vc.doppelExit.fire()
-              return
-        else:
-          validator.updateDoppelganger(epoch)
+          validator.doppelgangerChecked(epoch)
+
+          if item.is_live and validator.triggersDoppelganger(epoch):
+            warn "Doppelganger detection triggered",
+              validator = shortLog(validator), epoch
+
+            vc.doppelExit.fire()
+            return
+
+          break
 
 proc mainLoop(service: DoppelgangerServiceRef) {.async.} =
   let vc = service.client
@@ -55,8 +60,11 @@ proc mainLoop(service: DoppelgangerServiceRef) {.async.} =
 
   # On (re)start, we skip the remainder of the epoch before we start monitoring
   # for doppelgangers so we don't trigger on the attestations we produced before
-  # the epoch
-  await service.waitForNextEpoch()
+  # the epoch - there's no activity in the genesis slot, so if we start at or
+  # before that, we can safely perform the check for epoch 0 and thus keep
+  # validating in epoch 1
+  if vc.beaconClock.now().slotOrZero() > GENESIS_SLOT:
+    await service.waitForNextEpoch()
 
   while try:
     # Wait for the epoch to end - at the end (or really, the beginning of the

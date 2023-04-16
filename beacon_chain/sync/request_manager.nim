@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import std/[sequtils, strutils]
 import chronos, chronicles
@@ -17,7 +14,10 @@ import
   ../spec/forks,
   ../networking/eth2_network,
   ../consensus_object_pools/block_quarantine,
-  "."/sync_protocol, "."/sync_manager
+  "."/sync_protocol, "."/sync_manager,
+  ../gossip_processing/block_processor
+
+from ../beacon_clock import GetBeaconTimeFn
 export block_quarantine, sync_manager
 
 logScope:
@@ -32,12 +32,17 @@ const
 
 type
   BlockVerifier* =
-    proc(signedBlock: ForkedSignedBeaconBlock):
+    proc(signedBlock: ForkedSignedBeaconBlock, maybeFinalized: bool):
+      Future[Result[void, VerifierError]] {.gcsafe, raises: [Defect].}
+  BlockBlobsVerifier* =
+    proc(signedBlock: ForkedSignedBeaconBlock, blobs: BlobSidecars,
+         maybeFinalized: bool):
       Future[Result[void, VerifierError]] {.gcsafe, raises: [Defect].}
 
   RequestManager* = object
     network*: Eth2Node
     inpQueue*: AsyncQueue[FetchRecord]
+    getBeaconTime: GetBeaconTimeFn
     blockVerifier: BlockVerifier
     loopFuture: Future[void]
 
@@ -48,11 +53,14 @@ func shortLog*(x: seq[FetchRecord]): string =
   "[" & x.mapIt(shortLog(it.root)).join(", ") & "]"
 
 proc init*(T: type RequestManager, network: Eth2Node,
-           blockVerifier: BlockVerifier): RequestManager =
+              denebEpoch: Epoch,
+              getBeaconTime: GetBeaconTimeFn,
+              blockVerifier: BlockVerifier): RequestManager =
   RequestManager(
     network: network,
     inpQueue: newAsyncQueue[FetchRecord](),
-    blockVerifier: blockVerifier
+    getBeaconTime: getBeaconTime,
+    blockVerifier: blockVerifier,
   )
 
 proc checkResponse(roots: openArray[Eth2Digest],
@@ -87,7 +95,7 @@ proc fetchAncestorBlocksFromNetwork(rman: RequestManager,
           gotUnviableBlock = false
 
         for b in ublocks:
-          let ver = await rman.blockVerifier(b[])
+          let ver = await rman.blockVerifier(b[], false)
           if ver.isErr():
             case ver.error()
             of VerifierError.MissingParent:
@@ -140,6 +148,7 @@ proc fetchAncestorBlocksFromNetwork(rman: RequestManager,
   finally:
     if not(isNil(peer)):
       rman.network.peerPool.release(peer)
+
 
 proc requestManagerLoop(rman: RequestManager) {.async.} =
   var rootList = newSeq[Eth2Digest]()

@@ -5,10 +5,7 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   # Standard libraries
@@ -101,7 +98,7 @@ proc init*(T: type AttestationPool, dag: ChainDAGRef,
 
   var forkChoice = ForkChoice.init(
     finalizedEpochRef, dag.finalizedHead.blck,
-    lowParticipation in dag.updateFlags)
+    experimental in dag.updateFlags)
 
   # Feed fork choice with unfinalized history - during startup, block pool only
   # keeps track of a single history so we just need to follow it
@@ -137,7 +134,7 @@ proc init*(T: type AttestationPool, dag: ChainDAGRef,
           # and then to make sure the fork choice data structure doesn't grow
           # too big - getting an EpochRef can be expensive.
           forkChoice.backend.process_block(
-            blckRef.root, blckRef.parent.root, epochRef.checkpoints)
+            blckRef.bid, blckRef.parent.root, epochRef.checkpoints)
         else:
           epochRef = dag.getEpochRef(blckRef, blckRef.slot.epoch, false).expect(
             "Getting an EpochRef should always work for non-finalized blocks")
@@ -146,7 +143,7 @@ proc init*(T: type AttestationPool, dag: ChainDAGRef,
           var unrealized: FinalityCheckpoints
           if enableTestFeatures in dag.updateFlags and blckRef == dag.head:
             unrealized = withState(dag.headState):
-              when stateFork >= BeaconStateFork.Altair:
+              when consensusFork >= ConsensusFork.Altair:
                 forkyState.data.compute_unrealized_finality()
               else:
                 var cache: StateCache
@@ -405,7 +402,7 @@ func covers*(
 
   false
 
-from ../spec/datatypes/eip4844 import HashedBeaconState, shortLog
+from ../spec/datatypes/deneb import HashedBeaconState, shortLog
 
 proc addForkChoice*(pool: var AttestationPool,
                     epochRef: EpochRef,
@@ -486,7 +483,7 @@ func init(T: type AttestationCache, state: phase0.HashedBeaconState): T =
 func init(
     T: type AttestationCache,
     state: altair.HashedBeaconState | bellatrix.HashedBeaconState |
-           capella.HashedBeaconState | eip4844.HashedBeaconState,
+           capella.HashedBeaconState | deneb.HashedBeaconState,
     cache: var StateCache): T =
   # Load attestations that are scheduled for being given rewards for
   let
@@ -565,7 +562,7 @@ proc getAttestationsForBlock*(pool: var AttestationPool,
                               cache: var StateCache): seq[Attestation] =
   ## Retrieve attestations that may be added to a new block at the slot of the
   ## given state
-  ## https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#attestations
+  ## https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#attestations
   let newBlockSlot = state.data.slot.uint64
 
   if newBlockSlot < MIN_ATTESTATION_INCLUSION_DELAY:
@@ -584,7 +581,7 @@ proc getAttestationsForBlock*(pool: var AttestationPool,
       when state is phase0.HashedBeaconState:
         AttestationCache.init(state)
       elif state is altair.HashedBeaconState or state is bellatrix.HashedBeaconState or
-           state is capella.HashedBeaconState or state is eip4844.HashedBeaconState:
+           state is capella.HashedBeaconState or state is deneb.HashedBeaconState:
         AttestationCache.init(state, cache)
       else:
         static: doAssert false
@@ -648,7 +645,7 @@ proc getAttestationsForBlock*(pool: var AttestationPool,
       when state is altair.HashedBeaconState or
            state is bellatrix.HashedBeaconState or
            state is capella.HashedBeaconState or
-           state is eip4844.HashedBeaconState:
+           state is deneb.HashedBeaconState:
         MAX_ATTESTATIONS
       elif state is phase0.HashedBeaconState:
         state.data.previous_epoch_attestations.maxLen -
@@ -667,11 +664,7 @@ proc getAttestationsForBlock*(pool: var AttestationPool,
           # Fast path for when all remaining candidates fit
           if candidates.lenu64 < MAX_ATTESTATIONS: candidates.len - 1
           else: maxIndex(candidates)
-        # TODO slot not used; replace with _ when
-        # https://github.com/nim-lang/Nim/issues/15972 and
-        # https://github.com/nim-lang/Nim/issues/16217 are
-        # fixed in Status's Nim.
-        (_, slot, entry, j) = candidates[candidate]
+        (_, _, entry, j) = candidates[candidate]
 
       candidates.del(candidate) # careful, `del` reorders candidates
 
@@ -753,7 +746,7 @@ func getAggregatedAttestation*(pool: var AttestationPool,
                                index: CommitteeIndex): Opt[Attestation] =
   ## Select the attestation that has the most votes going for it in the given
   ## slot/index
-  ## https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#construct-aggregate
+  ## https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#construct-aggregate
   let candidateIdx = pool.candidateIdx(slot)
   if candidateIdx.isNone:
     return Opt.none(Attestation)
@@ -783,7 +776,7 @@ proc getBeaconHead*(
     finalizedExecutionPayloadHash =
       pool.dag.loadExecutionBlockRoot(pool.dag.finalizedHead.blck)
 
-    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/fork_choice/safe-block.md#get_safe_execution_payload_hash
+    # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/fork_choice/safe-block.md#get_safe_execution_payload_hash
     safeBlockRoot = pool.forkChoice.get_safe_beacon_block_root()
     safeBlock = pool.dag.getBlockRef(safeBlockRoot)
     safeExecutionPayloadHash =

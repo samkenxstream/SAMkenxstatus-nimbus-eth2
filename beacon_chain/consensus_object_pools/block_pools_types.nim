@@ -5,10 +5,7 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   # Standard library
@@ -23,7 +20,7 @@ import
   ./block_dag, block_pools_types_light_client
 
 from ../spec/datatypes/capella import TrustedSignedBeaconBlock
-from ../spec/datatypes/eip4844 import TrustedSignedBeaconBlock
+from ../spec/datatypes/deneb import TrustedSignedBeaconBlock
 
 from "."/vanity_logs/vanity_logs import VanityLogs
 
@@ -238,7 +235,7 @@ type
       ## committee messages will be rejected
 
     optimisticRoots*: HashSet[Eth2Digest]
-      ## https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/sync/optimistic.md#helpers
+      ## https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/sync/optimistic.md#helpers
 
   EpochKey* = object
     ## The epoch key fully determines the shuffling for proposers and
@@ -273,6 +270,8 @@ type
     proposer_dependent_root*: Eth2Digest
 
     shufflingRef*: ShufflingRef
+
+    total_active_balance*: Gwei
 
     # balances, as used in fork choice
     effective_balances_bytes*: seq[byte]
@@ -309,15 +308,15 @@ type
     epochRef: EpochRef,
     unrealized: FinalityCheckpoints) {.gcsafe, raises: [Defect].}
 
-  OnEIP4844BlockAdded* = proc(
+  OnDenebBlockAdded* = proc(
     blckRef: BlockRef,
-    blck: eip4844.TrustedSignedBeaconBlock,
+    blck: deneb.TrustedSignedBeaconBlock,
     epochRef: EpochRef,
     unrealized: FinalityCheckpoints) {.gcsafe, raises: [Defect].}
 
   OnForkyBlockAdded* =
     OnPhase0BlockAdded | OnAltairBlockAdded | OnBellatrixBlockAdded |
-    OnCapellaBlockAdded | OnEIP4844BlockAdded
+    OnCapellaBlockAdded | OnDenebBlockAdded
 
   HeadChangeInfoObject* = object
     slot*: Slot

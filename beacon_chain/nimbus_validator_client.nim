@@ -84,16 +84,10 @@ proc initGenesis(vc: ValidatorClientRef): Future[RestGenesis] {.async.} =
       return melem
 
 proc initValidators(vc: ValidatorClientRef): Future[bool] {.async.} =
-  info "Initializaing validators", path = vc.config.validatorsDir()
+  info "Loading validators", validatorsDir = vc.config.validatorsDir()
   var duplicates: seq[ValidatorPubKey]
-  for keystore in listLoadableKeystores(vc.config):
-    let pubkey = keystore.pubkey
-    if pubkey in duplicates:
-      warn "Duplicate validator key found", validator_pubkey = pubkey
-      continue
-    else:
-      duplicates.add(pubkey)
-      vc.addValidator(keystore)
+  for keystore in listLoadableKeystores(vc.config, vc.keystoreCache):
+    vc.addValidator(keystore)
   return true
 
 proc initClock(vc: ValidatorClientRef): Future[BeaconClock] {.async.} =
@@ -167,12 +161,34 @@ proc onSlotStart(vc: ValidatorClientRef, wallTime: BeaconTime,
   if checkIfShouldStopAtEpoch(wallSlot.slot, vc.config.stopAtEpoch):
     return true
 
-  info "Slot start",
-    slot = shortLog(wallSlot.slot),
-    attestationIn = vc.getDurationToNextAttestation(wallSlot.slot),
-    blockIn = vc.getDurationToNextBlock(wallSlot.slot),
-    validators = vc.attachedValidators[].count(),
-    delay = shortLog(delay)
+  if len(vc.beaconNodes) > 1:
+    let
+      counts = vc.getNodeCounts()
+      # Good nodes are nodes which can be used for ALL the requests.
+      goodNodes = counts.data[int(RestBeaconNodeStatus.Synced)]
+      # Viable nodes are nodes which can be used only SOME of the requests.
+      viableNodes = counts.data[int(RestBeaconNodeStatus.OptSynced)] +
+                    counts.data[int(RestBeaconNodeStatus.NotSynced)] +
+                    counts.data[int(RestBeaconNodeStatus.Compatible)]
+      # Bad nodes are nodes which can't be used at all.
+      badNodes = counts.data[int(RestBeaconNodeStatus.Offline)] +
+                 counts.data[int(RestBeaconNodeStatus.Online)] +
+                 counts.data[int(RestBeaconNodeStatus.Incompatible)]
+    info "Slot start",
+      slot = shortLog(wallSlot.slot),
+      attestationIn = vc.getDurationToNextAttestation(wallSlot.slot),
+      blockIn = vc.getDurationToNextBlock(wallSlot.slot),
+      validators = vc.attachedValidators[].count(),
+      good_nodes = goodNodes, viable_nodes = viableNodes, bad_nodes = badNodes,
+      delay = shortLog(delay)
+  else:
+    info "Slot start",
+      slot = shortLog(wallSlot.slot),
+      attestationIn = vc.getDurationToNextAttestation(wallSlot.slot),
+      blockIn = vc.getDurationToNextBlock(wallSlot.slot),
+      validators = vc.attachedValidators[].count(),
+      node_status = $vc.beaconNodes[0].status,
+      delay = shortLog(delay)
 
   return false
 
@@ -214,7 +230,8 @@ proc new*(T: type ValidatorClientRef,
       indicesAvailable: newAsyncEvent(),
       dynamicFeeRecipientsStore: newClone(DynamicFeeRecipientsStore.init()),
       sigintHandleFut: waitSignal(SIGINT),
-      sigtermHandleFut: waitSignal(SIGTERM)
+      sigtermHandleFut: waitSignal(SIGTERM),
+      keystoreCache: KeystoreCacheRef.init()
     )
   else:
     ValidatorClientRef(
@@ -228,7 +245,8 @@ proc new*(T: type ValidatorClientRef,
       doppelExit: newAsyncEvent(),
       dynamicFeeRecipientsStore: newClone(DynamicFeeRecipientsStore.init()),
       sigintHandleFut: newFuture[void]("sigint_placeholder"),
-      sigtermHandleFut: newFuture[void]("sigterm_placeholder")
+      sigtermHandleFut: newFuture[void]("sigterm_placeholder"),
+      keystoreCache: KeystoreCacheRef.init()
     )
 
 proc asyncInit(vc: ValidatorClientRef): Future[ValidatorClientRef] {.async.} =
@@ -277,9 +295,6 @@ proc asyncInit(vc: ValidatorClientRef): Future[ValidatorClientRef] {.async.} =
     vc.syncCommitteeService = await SyncCommitteeServiceRef.init(vc)
     vc.keymanagerServer = keymanagerInitResult.server
     if vc.keymanagerServer != nil:
-      func getValidatorData(pubkey: ValidatorPubKey): Opt[ValidatorAndIndex] =
-        Opt.none(ValidatorAndIndex)
-
       vc.keymanagerHost = newClone KeymanagerHost.init(
         validatorPool,
         vc.rng,
@@ -287,7 +302,8 @@ proc asyncInit(vc: ValidatorClientRef): Future[ValidatorClientRef] {.async.} =
         vc.config.validatorsDir,
         vc.config.secretsDir,
         vc.config.defaultFeeRecipient,
-        getValidatorData,
+        vc.config.suggestedGasLimit,
+        nil,
         vc.beaconClock.getBeaconTimeFn)
 
   except CatchableError as exc:
@@ -316,9 +332,11 @@ proc asyncRun*(vc: ValidatorClientRef) {.async.} =
     vc.keymanagerServer.router.installKeymanagerHandlers(vc.keymanagerHost[])
     vc.keymanagerServer.start()
 
-  var doppelEventFut = vc.doppelExit.wait()
+  let doppelEventFut = vc.doppelExit.wait()
   try:
     vc.runSlotLoopFut = runSlotLoop(vc, vc.beaconClock.now(), onSlotStart)
+    vc.runKeystoreCachePruningLoopFut =
+      runKeystorecachePruningLoop(vc.keystoreCache)
     discard await race(vc.runSlotLoopFut, doppelEventFut)
     if not(vc.runSlotLoopFut.finished()):
       notice "Received shutdown event, exiting"
@@ -331,7 +349,7 @@ proc asyncRun*(vc: ValidatorClientRef) {.async.} =
   await vc.shutdownMetrics()
   vc.shutdownSlashingProtection()
 
-  if doppelEventFut.finished:
+  if doppelEventFut.completed():
     # Critically, database has been shut down - the rest doesn't matter, we need
     # to stop as soon as possible
     # TODO we need to actually quit _before_ any other async tasks have had the
@@ -342,6 +360,8 @@ proc asyncRun*(vc: ValidatorClientRef) {.async.} =
   var pending: seq[Future[void]]
   if not(vc.runSlotLoopFut.finished()):
     pending.add(vc.runSlotLoopFut.cancelAndWait())
+  if not(vc.runKeystoreCachePruningLoopFut.finished()):
+    pending.add(vc.runKeystoreCachePruningLoopFut.cancelAndWait())
   if not(doppelEventFut.finished()):
     pending.add(doppelEventFut.cancelAndWait())
   debug "Stopping running services"

@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2020-2022 Status Research & Development GmbH
+# Copyright (c) 2020-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -250,21 +250,21 @@ proc cmdBench(conf: DbConf, cfg: RuntimeConfig) =
     let blck = blockRefs[blockRefs.len - b - 1]
 
     withTimer(timers[tLoadBlock]):
-      case cfg.blockForkAtEpoch(blck.slot.epoch)
-      of BeaconBlockFork.Phase0:
+      case cfg.consensusForkAtEpoch(blck.slot.epoch)
+      of ConsensusFork.Phase0:
         blocks[0].add dag.db.getBlock(
           blck.root, phase0.TrustedSignedBeaconBlock).get()
-      of BeaconBlockFork.Altair:
+      of ConsensusFork.Altair:
         blocks[1].add dag.db.getBlock(
           blck.root, altair.TrustedSignedBeaconBlock).get()
-      of BeaconBlockFork.Bellatrix:
+      of ConsensusFork.Bellatrix:
         blocks[2].add dag.db.getBlock(
           blck.root, bellatrix.TrustedSignedBeaconBlock).get()
-      of BeaconBlockFork.Capella:
+      of ConsensusFork.Capella:
         blocks[3].add dag.db.getBlock(
           blck.root, capella.TrustedSignedBeaconBlock).get()
-      of BeaconBlockFork.EIP4844:
-        raiseAssert $eip4844ImplementationMissing
+      of ConsensusFork.Deneb:
+        raiseAssert $denebImplementationMissing
 
   let stateData = newClone(dag.headState)
 
@@ -320,29 +320,29 @@ proc cmdBench(conf: DbConf, cfg: RuntimeConfig) =
               dbBenchmark.checkpoint()
 
             withTimer(timers[tDbLoad]):
-              case stateFork
-              of BeaconStateFork.Phase0:
+              case consensusFork
+              of ConsensusFork.Phase0:
                 doAssert dbBenchmark.getState(
                   forkyState.root, loadedState[0][].data, noRollback)
-              of BeaconStateFork.Altair:
+              of ConsensusFork.Altair:
                 doAssert dbBenchmark.getState(
                   forkyState.root, loadedState[1][].data, noRollback)
-              of BeaconStateFork.Bellatrix:
+              of ConsensusFork.Bellatrix:
                 doAssert dbBenchmark.getState(
                   forkyState.root, loadedState[2][].data, noRollback)
-              of BeaconStateFork.Capella:
+              of ConsensusFork.Capella:
                 doAssert dbBenchmark.getState(
                   forkyState.root, loadedState[3][].data, noRollback)
-              of BeaconStateFork.EIP4844:
-                raiseAssert $eip4844ImplementationMissing & ": ncli_db.nim: cmdBench (1)"
+              of ConsensusFork.Deneb:
+                raiseAssert $denebImplementationMissing & ": ncli_db.nim: cmdBench (1)"
 
             if forkyState.data.slot.epoch mod 16 == 0:
-              let loadedRoot = case stateFork
-                of BeaconStateFork.Phase0:    hash_tree_root(loadedState[0][].data)
-                of BeaconStateFork.Altair:    hash_tree_root(loadedState[1][].data)
-                of BeaconStateFork.Bellatrix: hash_tree_root(loadedState[2][].data)
-                of BeaconStateFork.Capella:   hash_tree_root(loadedState[3][].data)
-                of BeaconStateFork.EIP4844:   raiseAssert $eip4844ImplementationMissing & ": ncli_db.nim: cmdBench (2)"
+              let loadedRoot = case consensusFork
+                of ConsensusFork.Phase0:    hash_tree_root(loadedState[0][].data)
+                of ConsensusFork.Altair:    hash_tree_root(loadedState[1][].data)
+                of ConsensusFork.Bellatrix: hash_tree_root(loadedState[2][].data)
+                of ConsensusFork.Capella:   hash_tree_root(loadedState[3][].data)
+                of ConsensusFork.Deneb:     raiseAssert $denebImplementationMissing & ": ncli_db.nim: cmdBench (2)"
               doAssert hash_tree_root(forkyState.data) == loadedRoot
 
   processBlocks(blocks[0])
@@ -1035,11 +1035,8 @@ proc cmdValidatorDb(conf: DbConf, cfg: RuntimeConfig) =
       if nextSlot.is_epoch:
         withState(tmpState[]):
           var stateData = newClone(forkyState.data)
-          when stateFork == BeaconStateFork.EIP4844:
-            debugRaiseAssert $eip4844ImplementationMissing & ": ncli_db.nim:cmdValidatorDb"
-          else:
-            rewardsAndPenalties.collectEpochRewardsAndPenalties(
-              stateData[], cache, cfg, flags)
+          rewardsAndPenalties.collectEpochRewardsAndPenalties(
+            stateData[], cache, cfg, flags)
 
       let res = process_slots(cfg, tmpState[], nextSlot, cache, forkedInfo, flags)
       doAssert res.isOk, "Slot processing can't fail with correct inputs"

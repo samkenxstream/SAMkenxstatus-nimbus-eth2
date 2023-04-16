@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import std/[options, heapqueue, tables, strutils, sequtils, math]
 import stew/[results, base10], chronos, chronicles
@@ -29,7 +26,11 @@ type
   GetSlotCallback* = proc(): Slot {.gcsafe, raises: [Defect].}
   ProcessingCallback* = proc() {.gcsafe, raises: [Defect].}
   BlockVerifier* =
-    proc(signedBlock: ForkedSignedBeaconBlock):
+    proc(signedBlock: ForkedSignedBeaconBlock, maybeFinalized: bool):
+      Future[Result[void, VerifierError]] {.gcsafe, raises: [Defect].}
+  BlockBlobsVerifier* =
+    proc(signedBlock: ForkedSignedBeaconBlock, blobs: BlobSidecars,
+         maybeFinalized: bool):
       Future[Result[void, VerifierError]] {.gcsafe, raises: [Defect].}
 
   SyncQueueKind* {.pure.} = enum
@@ -45,6 +46,7 @@ type
   SyncResult*[T] = object
     request*: SyncRequest[T]
     data*: seq[ref ForkedSignedBeaconBlock]
+    blobs*: Opt[seq[BlobSidecars]]
 
   GapItem*[T] = object
     start*: Slot
@@ -77,6 +79,7 @@ type
     readyQueue: HeapQueue[SyncResult[T]]
     rewind: Option[RewindPoint]
     blockVerifier: BlockVerifier
+    blockBlobsVerifier: BlockBlobsVerifier
     ident*: string
 
 chronicles.formatIt SyncQueueKind: toLowerAscii($it)
@@ -112,6 +115,24 @@ proc getShortMap*[T](req: SyncRequest[T],
     slider = slider + 1
   res
 
+proc getShortMap*[T](req: SyncRequest[T],
+                     data: openArray[ref BlobSidecar]): string =
+  ## Returns all slot numbers in ``data`` as placement map.
+  var res = newStringOfCap(req.count * MAX_BLOBS_PER_BLOCK)
+  var cur : uint64 = 0
+  for slot in req.slot..<req.slot+req.count:
+    if slot == data[cur].slot:
+      for k in cur..<cur+MAX_BLOBS_PER_BLOCK:
+        inc(cur)
+        if slot == data[k].slot:
+          res.add('x')
+        else:
+          res.add('|')
+          break
+    else:
+      res.add('|')
+  res
+
 proc contains*[T](req: SyncRequest[T], slot: Slot): bool {.inline.} =
   slot >= req.slot and slot < req.slot + req.count
 
@@ -119,7 +140,7 @@ proc cmp*[T](a, b: SyncRequest[T]): int =
   cmp(uint64(a.slot), uint64(b.slot))
 
 proc checkResponse*[T](req: SyncRequest[T],
-                       data: openArray[ref ForkedSignedBeaconBlock]): bool =
+                       data: openArray[Slot]): bool =
   if len(data) == 0:
     # Impossible to verify empty response.
     return true
@@ -134,9 +155,9 @@ proc checkResponse*[T](req: SyncRequest[T],
   var dindex = 0
 
   while (rindex < req.count) and (dindex < len(data)):
-    if slot < data[dindex][].slot:
+    if slot < data[dindex]:
       discard
-    elif slot == data[dindex][].slot:
+    elif slot == data[dindex]:
       inc(dindex)
     else:
       return false
@@ -177,6 +198,7 @@ proc init*[T](t1: typedesc[SyncQueue], t2: typedesc[T],
               start, final: Slot, chunkSize: uint64,
               getSafeSlotCb: GetSlotCallback,
               blockVerifier: BlockVerifier,
+              blockBlobsVerifier: BlockBlobsVerifier,
               syncQueueSize: int = -1,
               ident: string = "main"): SyncQueue[T] =
   ## Create new synchronization queue with parameters
@@ -248,6 +270,7 @@ proc init*[T](t1: typedesc[SyncQueue], t2: typedesc[T],
     inpSlot: start,
     outSlot: start,
     blockVerifier: blockVerifier,
+    blockBlobsVerifier: blockBlobsVerifier,
     ident: ident
   )
 
@@ -581,6 +604,8 @@ func numAlreadyKnownSlots[T](sq: SyncQueue[T], sr: SyncRequest[T]): uint64 =
 
 proc push*[T](sq: SyncQueue[T], sr: SyncRequest[T],
               data: seq[ref ForkedSignedBeaconBlock],
+              blobs: Opt[seq[BlobSidecars]],
+              maybeFinalized: bool = false,
               processingCb: ProcessingCallback = nil) {.async.} =
   logScope:
     sync_ident = sq.ident
@@ -607,7 +632,7 @@ proc push*[T](sq: SyncQueue[T], sr: SyncRequest[T],
         # SyncQueue reset happens. We are exiting to wake up sync-worker.
         return
     else:
-      let syncres = SyncResult[T](request: sr, data: data)
+      let syncres = SyncResult[T](request: sr, data: data, blobs: blobs)
       sq.readyQueue.push(syncres)
       break
 
@@ -652,13 +677,18 @@ proc push*[T](sq: SyncQueue[T], sr: SyncRequest[T],
       missingParentSlot: Option[Slot]
       goodBlock: Option[Slot]
 
-      # compiler segfault if this is moved into the for loop, at time of writing
-      # TODO this does segfault in 1.2 but not 1.6, so remove workaround when 1.2
-      # is dropped.
+      # TODO when https://github.com/nim-lang/Nim/issues/21306 is fixed in used
+      # Nim versions, remove workaround and move `res` into for loop
       res: Result[void, VerifierError]
 
+    var i=0
     for blk in sq.blocks(item):
-      res = await sq.blockVerifier(blk[])
+      if reqres.get().blobs.isNone():
+        res = await sq.blockVerifier(blk[], maybeFinalized)
+      else:
+        res = await sq.blockBlobsVerifier(blk[], reqres.get().blobs.get()[i], maybeFinalized)
+      inc(i)
+
       if res.isOk():
         goodBlock = some(blk[].slot)
       else:

@@ -9,16 +9,16 @@
 
 import
   # Standard library
-  os, strutils, streams, strformat,
+  strutils, streams, strformat,
   macros, sets,
   # Third-party
   yaml,
   # Beacon chain internals
-  ../../beacon_chain/spec/datatypes/[altair, eip4844],
+  ../../beacon_chain/spec/datatypes/[altair, deneb],
   # Status libraries
   snappy,
   # Test utilities
-  ../../testutil, ../fixtures_utils
+  ../../testutil, ../fixtures_utils, ../os_ops
 
 from ../../beacon_chain/spec/datatypes/bellatrix import PowBlock
 from ../../beacon_chain/spec/datatypes/capella import
@@ -31,7 +31,7 @@ from ../../beacon_chain/spec/datatypes/capella import
 # ----------------------------------------------------------------
 
 const
-  SSZDir = SszTestsDir/const_preset/"eip4844"/"ssz_static"
+  SSZDir = SszTestsDir/const_preset/"deneb"/"ssz_static"
 
 type
   SSZHashTreeRoot = object
@@ -44,7 +44,7 @@ type
 # Note this only tracks HashTreeRoot
 # Checking the values against the yaml file is TODO (require more flexible Yaml parser)
 
-proc checkSSZ(T: type eip4844.SignedBeaconBlock, dir: string, expectedHash: SSZHashTreeRoot) =
+proc checkSSZ(T: type deneb.SignedBeaconBlock, dir: string, expectedHash: SSZHashTreeRoot) =
    # Deserialize into a ref object to not fill Nim stack
    let encoded = snappy.decode(
      readFileBytes(dir/"serialized.ssz_snappy"), MaxObjectSize)
@@ -83,7 +83,7 @@ proc loadExpectedHashTreeRoot(dir: string): SSZHashTreeRoot =
 # Test runner
 # ----------------------------------------------------------------
 
-suite "EF - EIP4844 - SSZ consensus objects " & preset():
+suite "EF - Deneb - SSZ consensus objects " & preset():
   doAssert dirExists(SSZDir), "You need to run the \"download_test_vectors.sh\" script to retrieve the consensus spec test vectors."
   for pathKind, sszType in walkDir(SSZDir, relative = true, checkDir = true):
     doAssert pathKind == pcDir
@@ -104,11 +104,12 @@ suite "EF - EIP4844 - SSZ consensus objects " & preset():
           of "Attestation": checkSSZ(Attestation, path, hash)
           of "AttestationData": checkSSZ(AttestationData, path, hash)
           of "AttesterSlashing": checkSSZ(AttesterSlashing, path, hash)
-          of "BeaconBlock": checkSSZ(eip4844.BeaconBlock, path, hash)
-          of "BeaconBlockBody": checkSSZ(eip4844.BeaconBlockBody, path, hash)
+          of "BeaconBlock": checkSSZ(deneb.BeaconBlock, path, hash)
+          of "BeaconBlockBody": checkSSZ(deneb.BeaconBlockBody, path, hash)
           of "BeaconBlockHeader": checkSSZ(BeaconBlockHeader, path, hash)
-          of "BeaconState": checkSSZ(eip4844.BeaconState, path, hash)
-          of "BlobsSidecar": checkSSZ(BlobsSidecar, path, hash)
+          of "BeaconState": checkSSZ(deneb.BeaconState, path, hash)
+          of "BlobIdentifier": checkSSZ(BlobIdentifier, path, hash)
+          of "BlobSidecar": checkSSZ(BlobSidecar, path, hash)
           of "BLSToExecutionChange": checkSSZ(BLSToExecutionChange, path, hash)
           of "Checkpoint": checkSSZ(Checkpoint, path, hash)
           of "ContributionAndProof": checkSSZ(ContributionAndProof, path, hash)
@@ -126,26 +127,23 @@ suite "EF - EIP4844 - SSZ consensus objects " & preset():
           of "HistoricalSummary": checkSSZ(HistoricalSummary, path, hash)
           of "IndexedAttestation": checkSSZ(IndexedAttestation, path, hash)
           of "LightClientBootstrap":
-            discard  # checkSSZ(capella.LightClientBootstrap, path, hash)
-          of "LightClientHeader":
-            discard  # checkSSZ(capella.LightClientHeader, path, hash)
-          of "LightClientUpdate":
-            discard  # checkSSZ(capella.LightClientUpdate, path, hash)
+            checkSSZ(deneb.LightClientBootstrap, path, hash)
+          of "LightClientHeader": checkSSZ(deneb.LightClientHeader, path, hash)
+          of "LightClientUpdate": checkSSZ(deneb.LightClientUpdate, path, hash)
           of "LightClientFinalityUpdate":
-            discard  # checkSSZ(capella.LightClientFinalityUpdate, path, hash)
+            checkSSZ(deneb.LightClientFinalityUpdate, path, hash)
           of "LightClientOptimisticUpdate":
-            discard  # checkSSZ(capella.LightClientOptimisticUpdate, path, hash)
+            checkSSZ(deneb.LightClientOptimisticUpdate, path, hash)
           of "PendingAttestation": checkSSZ(PendingAttestation, path, hash)
           of "PowBlock": checkSSZ(PowBlock, path, hash)
           of "ProposerSlashing": checkSSZ(ProposerSlashing, path, hash)
           of "SignedAggregateAndProof":
             checkSSZ(SignedAggregateAndProof, path, hash)
           of "SignedBeaconBlock":
-            checkSSZ(eip4844.SignedBeaconBlock, path, hash)
-          of "SignedBeaconBlockAndBlobsSidecar":
-            checkSSZ(eip4844.SignedBeaconBlockAndBlobsSidecar, path, hash)
+            checkSSZ(deneb.SignedBeaconBlock, path, hash)
           of "SignedBeaconBlockHeader":
             checkSSZ(SignedBeaconBlockHeader, path, hash)
+          of "SignedBlobSidecar": checkSSZ(SignedBlobSidecar, path, hash)
           of "SignedBLSToExecutionChange":
             checkSSZ(SignedBLSToExecutionChange, path, hash)
           of "SignedContributionAndProof":

@@ -5,13 +5,10 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
-  std/[options, tables, json, streams, sequtils, uri],
+  std/[tables, json, streams, sequtils, uri],
   chronos, chronicles, metrics, eth/async_utils,
   json_serialization/std/net,
   presto, presto/client,
@@ -24,18 +21,17 @@ import
   ./slashing_protection
 
 export
-  streams, options, keystore, phase0, altair, tables, uri, crypto,
+  streams, keystore, phase0, altair, tables, uri, crypto,
   rest_types, eth2_rest_serialization, rest_remote_signer_calls,
   slashing_protection
 
 const
   WEB3_SIGNER_DELAY_TOLERANCE = 3.seconds
-  DOPPELGANGER_EPOCHS_COUNT = 1
-    ## The number of full epochs that we monitor validators for doppelganger
-    ## protection
 
 declareGauge validators,
   "Number of validators attached to the beacon node"
+
+logScope: topics = "val_pool"
 
 type
   ValidatorKind* {.pure.} = enum
@@ -43,8 +39,9 @@ type
 
   ValidatorConnection* = RestClientRef
 
-  DoppelgangerStatus {.pure.} = enum
-    Unknown, Checking, Checked
+  ValidatorAndIndex* = object
+    index*: ValidatorIndex
+    validator*: Validator
 
   AttachedValidator* = ref object
     data*: KeystoreData
@@ -55,6 +52,7 @@ type
       clients*: seq[(RestClientRef, RemoteSignerInfo)]
       threshold*: uint32
 
+    updated*: bool
     index*: Opt[ValidatorIndex]
       ## Validator index which is assigned after the eth1 deposit has been
       ## processed - this index is valid across all eth2 forks for fork depths
@@ -74,9 +72,10 @@ type
     # builder should be informed of current validators
     externalBuilderRegistration*: Opt[SignedValidatorRegistrationV1]
 
-    doppelStatus: DoppelgangerStatus
-    doppelEpoch*: Opt[Epoch]
-      ## The epoch where doppelganger detection started doing its monitoring
+    doppelCheck*: Opt[Epoch]
+      ## The epoch where doppelganger detection last performed a check
+    doppelActivity*: Opt[Epoch]
+      ## The last time we attempted to perform a duty with this validator
 
     lastWarning*: Opt[Slot]
 
@@ -114,9 +113,9 @@ func init*(T: type ValidatorPool,
 template count*(pool: ValidatorPool): int =
   len(pool.validators)
 
-proc addLocalValidator*(
+proc addLocalValidator(
     pool: var ValidatorPool, keystore: KeystoreData,
-    feeRecipient: Eth1Address): AttachedValidator =
+    feeRecipient: Eth1Address, gasLimit: uint64): AttachedValidator =
   doAssert keystore.kind == KeystoreKind.Local
   let v = AttachedValidator(
     kind: ValidatorKind.Local,
@@ -130,14 +129,16 @@ proc addLocalValidator*(
   notice "Local validator attached",
     pubkey = v.pubkey,
     validator = shortLog(v),
-    initial_fee_recipient = feeRecipient.toHex()
+    initial_fee_recipient = feeRecipient.toHex(),
+    initial_gas_limit = gasLimit
   validators.set(pool.count().int64)
 
   v
 
-proc addRemoteValidator*(pool: var ValidatorPool, keystore: KeystoreData,
-                         clients: seq[(RestClientRef, RemoteSignerInfo)],
-                         feeRecipient: Eth1Address): AttachedValidator =
+proc addRemoteValidator(pool: var ValidatorPool, keystore: KeystoreData,
+                        clients: seq[(RestClientRef, RemoteSignerInfo)],
+                        feeRecipient: Eth1Address,
+                        gasLimit: uint64): AttachedValidator =
   doAssert keystore.kind == KeystoreKind.Remote
   let v = AttachedValidator(
     kind: ValidatorKind.Remote,
@@ -151,15 +152,57 @@ proc addRemoteValidator*(pool: var ValidatorPool, keystore: KeystoreData,
     pubkey = v.pubkey,
     validator = shortLog(v),
     remote_signer = $keystore.remotes,
-    initial_fee_recipient = feeRecipient.toHex()
+    initial_fee_recipient = feeRecipient.toHex(),
+    initial_gas_limit = gasLimit
 
   validators.set(pool.count().int64)
 
   v
 
+proc addRemoteValidator(pool: var ValidatorPool,
+                        keystore: KeystoreData,
+                        feeRecipient: Eth1Address,
+                        gasLimit: uint64): AttachedValidator =
+  let
+    httpFlags =
+      if RemoteKeystoreFlag.IgnoreSSLVerification in keystore.flags:
+        {HttpClientFlag.NoVerifyHost, HttpClientFlag.NoVerifyServerName}
+      else:
+        {}
+    prestoFlags = {RestClientFlag.CommaSeparatedArray}
+    clients =
+      block:
+        var res: seq[(RestClientRef, RemoteSignerInfo)]
+        for remote in keystore.remotes:
+          let client = RestClientRef.new($remote.url, prestoFlags, httpFlags)
+          if client.isErr():
+            # TODO keep trying in case of temporary network failure
+            warn "Unable to resolve distributed signer address",
+                  remote_url = $remote.url, validator = $remote.pubkey
+          else:
+            res.add((client.get(), remote))
+        res
+
+  pool.addRemoteValidator(keystore, clients, feeRecipient, gasLimit)
+
+proc addValidator*(pool: var ValidatorPool,
+                   keystore: KeystoreData,
+                   feeRecipient: Eth1Address,
+                   gasLimit: uint64): AttachedValidator =
+  pool.validators.withValue(keystore.pubkey, v):
+    notice "Adding already-known validator", validator = shortLog(v[])
+    return v[]
+
+  case keystore.kind
+  of KeystoreKind.Local:
+    pool.addLocalValidator(keystore, feeRecipient, gasLimit)
+  of KeystoreKind.Remote:
+    pool.addRemoteValidator(keystore, feeRecipient, gasLimit)
+
 proc getValidator*(pool: ValidatorPool,
-                   validatorKey: ValidatorPubKey): AttachedValidator =
-  pool.validators.getOrDefault(validatorKey)
+                   validatorKey: ValidatorPubKey): Opt[AttachedValidator] =
+  let v = pool.validators.getOrDefault(validatorKey)
+  if v == nil: Opt.none(AttachedValidator) else: Opt.some(v)
 
 proc contains*(pool: ValidatorPool, pubkey: ValidatorPubKey): bool =
   ## Returns ``true`` if validator with key ``pubkey`` present in ``pool``.
@@ -181,19 +224,32 @@ proc removeValidator*(pool: var ValidatorPool, pubkey: ValidatorPubKey) =
 proc needsUpdate*(validator: AttachedValidator): bool =
   validator.index.isNone() or validator.activationEpoch == FAR_FUTURE_EPOCH
 
-proc updateValidator*(validator: AttachedValidator,
-                      index: ValidatorIndex, activationEpoch: Epoch) =
-  ## Update activation information for a validator
-  validator.index = Opt.some(index)
-  validator.activationEpoch = activationEpoch
+proc updateValidator*(
+    validator: AttachedValidator, validatorData: Opt[ValidatorAndIndex]) =
+  defer: validator.updated = true
 
-  if validator.doppelStatus == DoppelgangerStatus.Unknown:
-    if validator.doppelEpoch.isSome() and activationEpoch != FAR_FUTURE_EPOCH:
-      let doppelEpoch = validator.doppelEpoch.get()
-      if doppelEpoch >= validator.activationEpoch + DOPPELGANGER_EPOCHS_COUNT:
-        validator.doppelStatus = DoppelgangerStatus.Checking
-      else:
-        validator.doppelStatus = DoppelgangerStatus.Checked
+  let
+    data = validatorData.valueOr:
+      if not validator.updated:
+        notice "Validator deposit not yet processed, monitoring",
+          pubkey = validator.pubkey
+
+      return
+    index = data.index
+    activationEpoch = data.validator.activation_epoch
+
+  ## Update activation information for a validator
+  if validator.index != Opt.some data.index:
+    validator.index = Opt.some data.index
+
+  if validator.activationEpoch != data.validator.activation_epoch:
+    # In theory, activation epoch could change but that's rare enough that it
+    # shouldn't practically matter for the current uses
+    info "Validator activation updated",
+      validator = shortLog(validator), pubkey = validator.pubkey, index,
+      activationEpoch
+
+    validator.activationEpoch = activationEpoch
 
 proc close*(pool: var ValidatorPool) =
   ## Unlock and close all validator keystore's files managed by ``pool``.
@@ -202,26 +258,6 @@ proc close*(pool: var ValidatorPool) =
     if res.isErr():
       notice "Could not unlock validator's keystore file",
              pubkey = validator.pubkey, validator = shortLog(validator)
-
-proc addRemoteValidator*(pool: var ValidatorPool,
-                         keystore: KeystoreData,
-                         feeRecipient: Eth1Address): AttachedValidator =
-  var clients: seq[(RestClientRef, RemoteSignerInfo)]
-  let httpFlags =
-    block:
-      var res: set[HttpClientFlag]
-      if RemoteKeystoreFlag.IgnoreSSLVerification in keystore.flags:
-        res.incl({HttpClientFlag.NoVerifyHost,
-                  HttpClientFlag.NoVerifyServerName})
-      res
-  let prestoFlags = {RestClientFlag.CommaSeparatedArray}
-  for remote in keystore.remotes:
-    let client = RestClientRef.new($remote.url, prestoFlags, httpFlags)
-    if client.isErr():
-      warn "Unable to resolve distributed signer address",
-          remote_url = $remote.url, validator = $remote.pubkey
-    clients.add((client.get(), remote))
-  pool.addRemoteValidator(keystore, clients, feeRecipient)
 
 iterator publicKeys*(pool: ValidatorPool): ValidatorPubKey =
   for item in pool.validators.keys():
@@ -236,69 +272,105 @@ iterator items*(pool: ValidatorPool): AttachedValidator =
   for item in pool.validators.values():
     yield item
 
-proc triggersDoppelganger*(v: AttachedValidator, epoch: Epoch): bool =
-  ## Returns true iff detected activity in the given epoch would trigger
-  ## doppelganger detection
-  if v.doppelStatus != DoppelgangerStatus.Checked:
-    if v.activationEpoch == FAR_FUTURE_EPOCH:
-      false
-    elif epoch < v.activationEpoch + DOPPELGANGER_EPOCHS_COUNT:
-      v.doppelStatus = DoppelgangerStatus.Checked
-      false
-    else:
-      true
+proc doppelgangerChecked*(validator: AttachedValidator, epoch: Epoch) =
+  ## Call when the validator was checked for activity in the given epoch
+
+  if validator.doppelCheck.isNone():
+    debug "Doppelganger first check",
+      validator = shortLog(validator), epoch
   else:
-    false
-
-proc updateDoppelganger*(validator: AttachedValidator, epoch: Epoch) =
-  ## Called when the validator has proven to be inactive in the given epoch -
-  ## this call should be made after the end of `epoch` before acting on duties
-  ## in `epoch + 1`.
-
-  if validator.doppelStatus == DoppelgangerStatus.Checked:
-    return
-
-  if validator.doppelEpoch.isNone():
-    validator.doppelEpoch = Opt.some epoch
-
-  let doppelEpoch = validator.doppelEpoch.get()
-
-  if validator.doppelStatus == DoppelgangerStatus.Unknown:
-    if validator.activationEpoch == FAR_FUTURE_EPOCH:
+    let check = validator.doppelCheck.get()
+    if check > epoch:
+      # Shouldn't happen but due to `await`, it may - consider turning into
+      # assert
+      debug "Doppelganger reordered check",
+        validator = shortLog(validator), check, epoch
       return
 
-    # We don't do doppelganger checking for validators that are about to be
-    # activated since both clients would be waiting for the other to start
-    # performing duties - this accounts for genesis as well
-    # The slot is rounded up to ensure we cover all slots
-    if doppelEpoch + 1 <= validator.activationEpoch + DOPPELGANGER_EPOCHS_COUNT:
-      validator.doppelStatus = DoppelgangerStatus.Checked
+    if check - epoch > 1:
+      debug "Doppelganger stale check",
+        validator = shortLog(validator), check, epoch
+
+  validator.doppelCheck = Opt.some epoch
+
+proc doppelgangerActivity*(validator: AttachedValidator, epoch: Epoch) =
+  ## Call when we performed a doppelganger-monitored activity in the epoch
+  if validator.doppelActivity.isNone():
+    debug "Doppelganger first activity",
+      validator = shortLog(validator), epoch
+  else:
+    let activity = validator.doppelActivity.get()
+    if activity > epoch:
+      # Shouldn't happen but due to `await`, it may - consider turning into
+      # assert
+      debug "Doppelganger reordered activity",
+        validator = shortLog(validator), activity, epoch
       return
 
-    validator.doppelStatus = DoppelgangerStatus.Checking
+    if activity - epoch > 1:
+      # We missed work in some epoch
+      debug "Doppelganger stale activity",
+        validator = shortLog(validator), activity, epoch
 
-  if epoch + 1 >= doppelEpoch + DOPPELGANGER_EPOCHS_COUNT:
-    validator.doppelStatus = DoppelgangerStatus.Checked
+  validator.doppelActivity = Opt.some epoch
+
+func triggersDoppelganger*(v: AttachedValidator, epoch: Epoch): bool =
+  ## Returns true iff we have proof that an activity in the given epoch
+  ## triggers doppelganger detection: this means the network was active for this
+  ## validator during the given epoch (via doppelgangerChecked) but the activity
+  ## did not originate from this instance.
+
+  if v.doppelActivity.isSome() and v.doppelActivity.get() >= epoch:
+    false # This was our own activity
+  elif v.doppelCheck.isNone():
+    false # Can't prove that the activity triggers the check
+  else:
+    v.doppelCheck.get() == epoch
+
+proc doppelgangerReady*(validator: AttachedValidator, slot: Slot): bool =
+  ## Returns true iff the validator has passed doppelganger detection by being
+  ## monitored in the previous epoch (or the given epoch is the activation
+  ## epoch, in which case we always consider it ready)
+  ##
+  ## If we checked doppelganger, we allow the check to lag by one slot to avoid
+  ## a race condition where the check for epoch N is ongoing and block
+  ## block production for slot_start(N+1) is about to happen
+  let epoch = slot.epoch
+  epoch == validator.activationEpoch or
+    (validator.doppelCheck.isSome and
+      (((validator.doppelCheck.get() + 1) == epoch) or
+      (((validator.doppelCheck.get() + 2).start_slot) == slot)))
 
 proc getValidatorForDuties*(
-    pool: ValidatorPool, key: ValidatorPubKey, slot: Slot):
+    pool: ValidatorPool, key: ValidatorPubKey, slot: Slot,
+    slashingSafe: bool):
     Opt[AttachedValidator] =
   ## Return validator only if it is ready for duties (has index and has passed
   ## doppelganger check where applicable)
-  let validator = pool.getValidator(key)
-  if isNil(validator) or validator.index.isNone():
+  let validator = ? pool.getValidator(key)
+  if validator.index.isNone():
     return Opt.none(AttachedValidator)
 
+  # Sync committee duties are not slashable, so we perform them even during
+  # doppelganger detection
   if pool.doppelgangerDetectionEnabled and
-      validator.triggersDoppelganger(slot.epoch):
-    # If the validator would trigger for an activity in the given slot, we don't
-    # return it for duties
+      not validator.doppelgangerReady(slot) and
+      not slashingSafe:
     notice "Doppelganger detection active - " &
-           "skipping validator duties while observing the network",
-            validator = shortLog(validator)
+          "skipping validator duties while observing the network",
+            validator = shortLog(validator),
+            slot,
+            doppelCheck = validator.doppelCheck,
+            activationEpoch = shortLog(validator.activationEpoch)
+
     return Opt.none(AttachedValidator)
 
   return Opt.some(validator)
+
+func triggersDoppelganger*(
+    pool: ValidatorPool, pubkey: ValidatorPubKey, epoch: Epoch): bool =
+  let v = pool.getValidator(pubkey)
+  v.isSome() and v[].triggersDoppelganger(epoch)
 
 proc signWithDistributedKey(v: AttachedValidator,
                             request: Web3SignerRequest): Future[SignatureResult]
@@ -353,12 +425,13 @@ proc signData(v: AttachedValidator,
   else:
     v.signWithDistributedKey(request)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#signature
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#signature
 proc getBlockSignature*(v: AttachedValidator, fork: Fork,
                         genesis_validators_root: Eth2Digest, slot: Slot,
                         block_root: Eth2Digest,
                         blck: ForkedBeaconBlock | ForkedBlindedBeaconBlock |
-                              BlindedBeaconBlock
+                              bellatrix_mev.BlindedBeaconBlock |
+                              capella_mev.BlindedBeaconBlock
                        ): Future[SignatureResult] {.async.} =
   return
     case v.kind
@@ -372,67 +445,74 @@ proc getBlockSignature*(v: AttachedValidator, fork: Fork,
         let
           web3SignerBlock =
             case blck.kind
-            of BeaconBlockFork.Phase0:
+            of ConsensusFork.Phase0:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.Phase0,
+                kind: ConsensusFork.Phase0,
                 phase0Data: blck.phase0Data)
-            of BeaconBlockFork.Altair:
+            of ConsensusFork.Altair:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.Altair,
+                kind: ConsensusFork.Altair,
                 altairData: blck.altairData)
-            of BeaconBlockFork.Bellatrix:
+            of ConsensusFork.Bellatrix:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.Bellatrix,
+                kind: ConsensusFork.Bellatrix,
                 bellatrixData: blck.bellatrixData.toBeaconBlockHeader)
-            of BeaconBlockFork.Capella:
+            of ConsensusFork.Capella:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.Capella,
+                kind: ConsensusFork.Capella,
                 capellaData: blck.capellaData.toBeaconBlockHeader)
-            of BeaconBlockFork.EIP4844:
+            of ConsensusFork.Deneb:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.EIP4844,
-                eip4844Data: blck.eip4844Data.toBeaconBlockHeader)
+                kind: ConsensusFork.Deneb,
+                denebData: blck.denebData.toBeaconBlockHeader)
 
           request = Web3SignerRequest.init(
             fork, genesis_validators_root, web3SignerBlock)
         await v.signData(request)
-      elif blck is BlindedBeaconBlock:
+      elif blck is bellatrix_mev.BlindedBeaconBlock:
         let request = Web3SignerRequest.init(
           fork, genesis_validators_root,
           Web3SignerForkedBeaconBlock(
-            kind: BeaconBlockFork.Bellatrix,
+            kind: ConsensusFork.Bellatrix,
             bellatrixData: blck.toBeaconBlockHeader))
+        await v.signData(request)
+      elif blck is capella_mev.BlindedBeaconBlock:
+        let request = Web3SignerRequest.init(
+          fork, genesis_validators_root,
+          Web3SignerForkedBeaconBlock(
+            kind: ConsensusFork.Capella,
+            capellaData: blck.toBeaconBlockHeader))
         await v.signData(request)
       else:
         let
           web3SignerBlock =
             case blck.kind
-            of BeaconBlockFork.Phase0:
+            of ConsensusFork.Phase0:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.Phase0,
+                kind: ConsensusFork.Phase0,
                 phase0Data: blck.phase0Data)
-            of BeaconBlockFork.Altair:
+            of ConsensusFork.Altair:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.Altair,
+                kind: ConsensusFork.Altair,
                 altairData: blck.altairData)
-            of BeaconBlockFork.Bellatrix:
+            of ConsensusFork.Bellatrix:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.Bellatrix,
+                kind: ConsensusFork.Bellatrix,
                 bellatrixData: blck.bellatrixData.toBeaconBlockHeader)
-            of BeaconBlockFork.Capella:
+            of ConsensusFork.Capella:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.Capella,
+                kind: ConsensusFork.Capella,
                 capellaData: blck.capellaData.toBeaconBlockHeader)
-            of BeaconBlockFork.EIP4844:
+            of ConsensusFork.Deneb:
               Web3SignerForkedBeaconBlock(
-                kind: BeaconBlockFork.EIP4844,
-                eip4844Data: blck.eip4844Data.toBeaconBlockHeader)
+                kind: ConsensusFork.Deneb,
+                denebData: blck.denebData.toBeaconBlockHeader)
 
           request = Web3SignerRequest.init(
             fork, genesis_validators_root, web3SignerBlock)
         await v.signData(request)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#aggregate-signature
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#aggregate-signature
 proc getAttestationSignature*(v: AttachedValidator, fork: Fork,
                               genesis_validators_root: Eth2Digest,
                               data: AttestationData
@@ -448,7 +528,7 @@ proc getAttestationSignature*(v: AttachedValidator, fork: Fork,
       let request = Web3SignerRequest.init(fork, genesis_validators_root, data)
       await v.signData(request)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#broadcast-aggregate
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#broadcast-aggregate
 proc getAggregateAndProofSignature*(v: AttachedValidator,
                                     fork: Fork,
                                     genesis_validators_root: Eth2Digest,
@@ -467,7 +547,7 @@ proc getAggregateAndProofSignature*(v: AttachedValidator,
         fork, genesis_validators_root, aggregate_and_proof)
       await v.signData(request)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/altair/validator.md#prepare-sync-committee-message
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/altair/validator.md#prepare-sync-committee-message
 proc getSyncCommitteeMessage*(v: AttachedValidator,
                               fork: Fork,
                               genesis_validators_root: Eth2Digest,
@@ -498,7 +578,7 @@ proc getSyncCommitteeMessage*(v: AttachedValidator,
       )
     )
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/altair/validator.md#aggregation-selection
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/altair/validator.md#aggregation-selection
 proc getSyncCommitteeSelectionProof*(v: AttachedValidator, fork: Fork,
                                      genesis_validators_root: Eth2Digest,
                                      slot: Slot,
@@ -518,7 +598,7 @@ proc getSyncCommitteeSelectionProof*(v: AttachedValidator, fork: Fork,
       )
       await v.signData(request)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/altair/validator.md#broadcast-sync-committee-contribution
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/altair/validator.md#broadcast-sync-committee-contribution
 proc getContributionAndProofSignature*(v: AttachedValidator, fork: Fork,
                                        genesis_validators_root: Eth2Digest,
                                        contribution_and_proof: ContributionAndProof
@@ -534,7 +614,7 @@ proc getContributionAndProofSignature*(v: AttachedValidator, fork: Fork,
         fork, genesis_validators_root, contribution_and_proof)
       await v.signData(request)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#randao-reveal
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#randao-reveal
 proc getEpochSignature*(v: AttachedValidator, fork: Fork,
                         genesis_validators_root: Eth2Digest, epoch: Epoch
                        ): Future[SignatureResult] {.async.} =
@@ -549,7 +629,7 @@ proc getEpochSignature*(v: AttachedValidator, fork: Fork,
         fork, genesis_validators_root, epoch)
       await v.signData(request)
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#aggregation-selection
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#aggregation-selection
 proc getSlotSignature*(v: AttachedValidator, fork: Fork,
                        genesis_validators_root: Eth2Digest, slot: Slot
                       ): Future[SignatureResult] {.async.} =
@@ -572,7 +652,7 @@ proc getSlotSignature*(v: AttachedValidator, fork: Fork,
   v.slotSignature = Opt.some((slot, signature.get))
   return signature
 
-# https://github.com/ethereum/builder-specs/blob/v0.2.0/specs/builder.md#signing
+# https://github.com/ethereum/builder-specs/blob/v0.3.0/specs/bellatrix/builder.md#signing
 proc getBuilderSignature*(v: AttachedValidator, fork: Fork,
     validatorRegistration: ValidatorRegistrationV1):
     Future[SignatureResult] {.async.} =

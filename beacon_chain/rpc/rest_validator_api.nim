@@ -1,4 +1,4 @@
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -63,9 +63,9 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
           wallEpoch = wallTime.slotOrZero().epoch
         if res > wallEpoch + 1:
           return RestApiResponse.jsonError(Http400, InvalidEpochValueError,
-                                           "Cannot request duties past next epoch")
+                                        "Cannot request duties past next epoch")
         res
-    let qhead =
+    let (qhead, qoptimistic) =
       block:
         let res = node.getSyncedHead(qepoch)
         if res.isErr():
@@ -102,10 +102,9 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
                   )
         res
 
-    # getSyncedHead() implies non-optimistic node.
     let optimistic =
       if node.currentSlot().epoch() >= node.dag.cfg.BELLATRIX_FORK_EPOCH:
-        some(false)
+        some(qoptimistic)
       else:
         none[bool]()
 
@@ -126,9 +125,9 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
           wallEpoch = wallTime.slotOrZero().epoch
         if res > wallEpoch + 1:
           return RestApiResponse.jsonError(Http400, InvalidEpochValueError,
-                                           "Cannot request duties past next epoch")
+                                        "Cannot request duties past next epoch")
         res
-    let qhead =
+    let (qhead, qoptimistic) =
       block:
         let res = node.getSyncedHead(qepoch)
         if res.isErr():
@@ -156,10 +155,9 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
             )
         res
 
-    # getSyncedHead() implies non-optimistic node.
     let optimistic =
       if node.currentSlot().epoch() >= node.dag.cfg.BELLATRIX_FORK_EPOCH:
-        some(false)
+        some(qoptimistic)
       else:
         none[bool]()
 
@@ -249,7 +247,7 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
     if qSyncPeriod == headSyncPeriod:
       let optimistic = node.getStateOptimistic(node.dag.headState)
       let res = withState(node.dag.headState):
-        when stateFork >= BeaconStateFork.Altair:
+        when consensusFork >= ConsensusFork.Altair:
           produceResponse(indexList,
                           forkyState.data.current_sync_committee.pubkeys.data,
                           forkyState.data.validators.asSeq)
@@ -259,7 +257,7 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
     elif qSyncPeriod == (headSyncPeriod + 1):
       let optimistic = node.getStateOptimistic(node.dag.headState)
       let res = withState(node.dag.headState):
-        when stateFork >= BeaconStateFork.Altair:
+        when consensusFork >= ConsensusFork.Altair:
           produceResponse(indexList,
                           forkyState.data.next_sync_committee.pubkeys.data,
                           forkyState.data.validators.asSeq)
@@ -290,7 +288,7 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
       node.withStateForBlockSlotId(bsi):
         let optimistic = node.getStateOptimistic(state)
         let res = withState(state):
-          when stateFork >= BeaconStateFork.Altair:
+          when consensusFork >= ConsensusFork.Altair:
             produceResponse(indexList,
                             forkyState.data.current_sync_committee.pubkeys.data,
                             forkyState.data.validators.asSeq)
@@ -364,7 +362,10 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
             if res.isErr():
               return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError,
                                                $res.error())
-            res.get()
+            let tres = res.get()
+            if tres.optimistic:
+              return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError)
+            tres.head
         let
           proposer = node.dag.getProposer(qhead, qslot).valueOr:
             return RestApiResponse.jsonError(Http400, ProposerNotFoundError)
@@ -374,15 +375,32 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
           return RestApiResponse.jsonError(Http400, InvalidRandaoRevealValue)
 
         let res =
-          if qslot.epoch >= node.dag.cfg.CAPELLA_FORK_EPOCH:
-            await makeBeaconBlockForHeadAndSlot[capella.ExecutionPayload](
+          case node.dag.cfg.consensusForkAtEpoch(qslot.epoch)
+          of ConsensusFork.Deneb:
+            # TODO
+            # We should return a block with sidecars here
+            # https://github.com/ethereum/beacon-APIs/pull/302/files
+            # The code paths leading to makeBeaconBlockForHeadAndSlot are already
+            # partially refactored to make it possible to return the blobs from
+            # the call, but the signature of the call needs to be changed furhter
+            # to access the blobs here.
+            discard $denebImplementationMissing
+            await makeBeaconBlockForHeadAndSlot(
+              deneb.ExecutionPayloadForSigning,
               node, qrandao, proposer, qgraffiti, qhead, qslot)
-          else:
-            await makeBeaconBlockForHeadAndSlot[bellatrix.ExecutionPayload](
+          of ConsensusFork.Capella:
+            await makeBeaconBlockForHeadAndSlot(
+              capella.ExecutionPayloadForSigning,
               node, qrandao, proposer, qgraffiti, qhead, qslot)
+          of ConsensusFork.Bellatrix:
+            await makeBeaconBlockForHeadAndSlot(
+              bellatrix.ExecutionPayloadForSigning,
+              node, qrandao, proposer, qgraffiti, qhead, qslot)
+          of ConsensusFork.Altair, ConsensusFork.Phase0:
+            return RestApiResponse.jsonError(Http400, InvalidSlotValueError)
         if res.isErr():
           return RestApiResponse.jsonError(Http400, res.error())
-        res.get()
+        res.get
     return RestApiResponse.jsonResponsePlain(message)
 
   # https://ethereum.github.io/beacon-APIs/#/Validator/produceBlindedBlock
@@ -454,7 +472,10 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
         if res.isErr():
           return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError,
                                            $res.error())
-        res.get()
+        let tres = res.get()
+        if tres.optimistic:
+          return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError)
+        tres.head
     let proposer = node.dag.getProposer(qhead, qslot).valueOr:
       return RestApiResponse.jsonError(Http400, ProposerNotFoundError)
 
@@ -470,21 +491,39 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
       else:
         RestApiResponse.jsonError(Http500, InvalidAcceptError)
 
-    if node.currentSlot().epoch() >= node.dag.cfg.BELLATRIX_FORK_EPOCH:
-      let res = await makeBlindedBeaconBlockForHeadAndSlot(
+    static: doAssert high(ConsensusFork) == ConsensusFork.Deneb
+    case node.dag.cfg.consensusForkAtEpoch(node.currentSlot.epoch)
+    of ConsensusFork.Deneb:
+      # TODO
+      # We should return a block with sidecars here
+      # https://github.com/ethereum/beacon-APIs/pull/302/files
+      debugRaiseAssert $denebImplementationMissing & ": GET /eth/v1/validator/blinded_blocks/{slot}"
+    of ConsensusFork.Capella:
+      let res = await makeBlindedBeaconBlockForHeadAndSlot[
+          capella_mev.BlindedBeaconBlock](
         node, qrandao, proposer, qgraffiti, qhead, qslot)
       if res.isErr():
         return RestApiResponse.jsonError(Http400, res.error())
       return responsePlain(ForkedBlindedBeaconBlock(
-        kind: BeaconBlockFork.Bellatrix,
-        bellatrixData: res.get()))
-    else:
-      # Pre-Bellatrix, this endpoint will return a BeaconBlock
-      let res = await makeBeaconBlockForHeadAndSlot[bellatrix.ExecutionPayload](
+        kind: ConsensusFork.Capella,
+        capellaData: res.get()))
+    of ConsensusFork.Bellatrix:
+      let res = await makeBlindedBeaconBlockForHeadAndSlot[
+          bellatrix_mev.BlindedBeaconBlock](
         node, qrandao, proposer, qgraffiti, qhead, qslot)
       if res.isErr():
         return RestApiResponse.jsonError(Http400, res.error())
-      return responsePlain(res.get())
+      return responsePlain(ForkedBlindedBeaconBlock(
+        kind: ConsensusFork.Bellatrix,
+        bellatrixData: res.get()))
+    of ConsensusFork.Altair, ConsensusFork.Phase0:
+      # Pre-Bellatrix, this endpoint will return a BeaconBlock
+      let res = await makeBeaconBlockForHeadAndSlot(
+        bellatrix.ExecutionPayloadForSigning, node, qrandao,
+        proposer, qgraffiti, qhead, qslot)
+      if res.isErr():
+        return RestApiResponse.jsonError(Http400, res.error())
+      return responsePlain(res.get)
 
   # https://ethereum.github.io/beacon-APIs/#/Validator/produceAttestationData
   router.api(MethodGet, "/eth/v1/validator/attestation_data") do (
@@ -530,8 +569,12 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
           block:
             let res = node.getSyncedHead(qslot)
             if res.isErr():
+              return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError,
+                                               $res.error())
+            let tres = res.get()
+            if tres.optimistic:
               return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError)
-            res.get()
+            tres.head
         let epochRef = node.dag.getEpochRef(qhead, qslot.epoch, true).valueOr:
           return RestApiResponse.jsonError(Http400, PrunedStateError, $error)
         makeAttestationData(epochRef, qhead.atSlot(qslot), qindex)
@@ -619,7 +662,8 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
                                            InvalidSubscriptionRequestValueError,
                                            $dres.error())
         dres.get()
-    if node.isSynced(node.dag.head) != SyncStatus.synced:
+
+    if node.isSynced(node.dag.head) == SyncStatus.unsynced:
       return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError)
 
     let
@@ -770,7 +814,7 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
 
     # Check if node is fully synced.
     let sres = node.getSyncedHead(qslot)
-    if sres.isErr():
+    if sres.isErr() or sres.get().optimistic:
       return RestApiResponse.jsonError(Http503, BeaconNodeInSyncError)
 
     var contribution = SyncCommitteeContribution()
@@ -949,3 +993,27 @@ proc installValidatorApiHandlers*(router: var RestRouter, node: BeaconNode) =
         )
       )
     return RestApiResponse.jsonResponse(response)
+
+  # https://github.com/ethereum/beacon-APIs/blob/f087fbf2764e657578a6c29bdf0261b36ee8db1e/apis/validator/beacon_committee_selections.yaml
+  router.api(MethodPost, "/eth/v1/validator/beacon_committee_selections") do (
+    contentBody: Option[ContentBody]) -> RestApiResponse:
+    # "Consensus clients need not support this endpoint and may return a 501."
+    # https://github.com/ethereum/beacon-APIs/pull/224: "This endpoint need not
+    # be implemented on the CL side. Once a validator client is aware of it and
+    # able to use it when a feature flag is turned on, the intercepting
+    # middleware can handle and swallow the request. I suggest a CL either
+    # returns 501 Not Implemented [or] 400 Bad Request."
+    return RestApiResponse.jsonError(
+      Http501, AggregationSelectionNotImplemented)
+
+  # https://github.com/ethereum/beacon-APIs/blob/f087fbf2764e657578a6c29bdf0261b36ee8db1e/apis/validator/sync_committee_selections.yaml
+  router.api(MethodPost, "/eth/v1/validator/sync_committee_selections") do (
+    contentBody: Option[ContentBody]) -> RestApiResponse:
+    # "Consensus clients need not support this endpoint and may return a 501."
+    # https://github.com/ethereum/beacon-APIs/pull/224: "This endpoint need not
+    # be implemented on the CL side. Once a validator client is aware of it and
+    # able to use it when a feature flag is turned on, the intercepting
+    # middleware can handle and swallow the request. I suggest a CL either
+    # returns 501 Not Implemented [or] 400 Bad Request."
+    return RestApiResponse.jsonError(
+      Http501, AggregationSelectionNotImplemented)

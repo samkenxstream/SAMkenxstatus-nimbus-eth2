@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   std/[sequtils, strutils, os],
@@ -48,7 +45,7 @@ type
       #      branch is not active and thus it will override the first variable
       #      in this branch.
       dummy: string
-      # If the eth1Network is specified, the Eth1Monitor will perform some
+      # If the eth1Network is specified, the ELManager will perform some
       # additional checks to ensure we are connecting to a web3 provider
       # serving data for the same network. The value can be set to `None`
       # for custom networks and testing purposes.
@@ -220,7 +217,7 @@ when const_preset == "gnosis":
   static:
     checkForkConsistency(gnosisMetadata.cfg)
     doAssert gnosisMetadata.cfg.CAPELLA_FORK_EPOCH == FAR_FUTURE_EPOCH
-    doAssert gnosisMetadata.cfg.EIP4844_FORK_EPOCH == FAR_FUTURE_EPOCH
+    doAssert gnosisMetadata.cfg.DENEB_FORK_EPOCH == FAR_FUTURE_EPOCH
 
 elif const_preset == "mainnet":
   const
@@ -228,11 +225,11 @@ elif const_preset == "mainnet":
     praterMetadata* = eth2Network("shared/prater", goerli)
     sepoliaMetadata* = mergeTestnet("sepolia", sepolia)
   static:
-    for network in [
-        mainnetMetadata, praterMetadata, sepoliaMetadata]:
+    for network in [mainnetMetadata, praterMetadata, sepoliaMetadata]:
       checkForkConsistency(network.cfg)
-      doAssert network.cfg.CAPELLA_FORK_EPOCH == FAR_FUTURE_EPOCH
-      doAssert network.cfg.EIP4844_FORK_EPOCH == FAR_FUTURE_EPOCH
+
+    for network in [mainnetMetadata, praterMetadata]:
+      doAssert network.cfg.DENEB_FORK_EPOCH == FAR_FUTURE_EPOCH
 
 proc getMetadataForNetwork*(
     networkName: string): Eth2NetworkMetadata {.raises: [Defect, IOError].} =

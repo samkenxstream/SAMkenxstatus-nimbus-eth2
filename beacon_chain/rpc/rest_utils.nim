@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2022 Status Research & Development GmbH
+# Copyright (c) 2022-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import std/[options, macros],
        stew/byteutils, presto,
@@ -33,17 +30,26 @@ func match(data: openArray[char], charset: set[char]): int =
       return 1
   0
 
-proc getSyncedHead*(node: BeaconNode, slot: Slot): Result[BlockRef, cstring] =
-  let head = node.dag.head
-
-  if node.isSynced(head) != SyncStatus.synced:
-    return err("Beacon node not fully and non-optimistically synced")
+proc getSyncedHead*(
+       node: BeaconNode,
+       slot: Slot
+     ): Result[tuple[head: BlockRef, optimistic: bool], cstring] =
+  let
+    head = node.dag.head
+    optimistic =
+      case node.isSynced(head)
+      of SyncStatus.unsynced:
+        return err("Beacon node not fully and non-optimistically synced")
+      of SyncStatus.synced:
+        false
+      of SyncStatus.optimistic:
+        true
 
   # Enough ahead not to know the shuffling
   if slot > head.slot + SLOTS_PER_EPOCH * 2:
     return err("Requesting far ahead of the current head")
 
-  ok(head)
+  ok((head, optimistic))
 
 func getCurrentSlot*(node: BeaconNode, slot: Slot):
     Result[Slot, cstring] =
@@ -52,8 +58,10 @@ func getCurrentSlot*(node: BeaconNode, slot: Slot):
   else:
     err("Requesting slot too far ahead of the current head")
 
-proc getSyncedHead*(node: BeaconNode,
-                    epoch: Epoch): Result[BlockRef, cstring] =
+proc getSyncedHead*(
+       node: BeaconNode,
+       epoch: Epoch,
+     ): Result[tuple[head: BlockRef, optimistic: bool], cstring] =
   if epoch > MaxEpoch:
     return err("Requesting epoch for which slot would overflow")
   node.getSyncedHead(epoch.start_slot())
@@ -225,7 +233,7 @@ func syncCommitteeParticipants*(forkedState: ForkedHashedBeaconState,
                                 epoch: Epoch
                                ): Result[seq[ValidatorPubKey], cstring] =
   withState(forkedState):
-    when stateFork >= BeaconStateFork.Altair:
+    when consensusFork >= ConsensusFork.Altair:
       let
         epochPeriod = sync_committee_period(epoch)
         curPeriod = sync_committee_period(forkyState.data.slot)
@@ -268,10 +276,10 @@ proc getStateOptimistic*(node: BeaconNode,
                          state: ForkedHashedBeaconState): Option[bool] =
   if node.currentSlot().epoch() >= node.dag.cfg.BELLATRIX_FORK_EPOCH:
     case state.kind
-    of BeaconStateFork.Phase0, BeaconStateFork.Altair:
+    of ConsensusFork.Phase0, ConsensusFork.Altair:
       some[bool](false)
-    of  BeaconStateFork.Bellatrix, BeaconStateFork.Capella,
-        BeaconStateFork.EIP4844:
+    of  ConsensusFork.Bellatrix, ConsensusFork.Capella,
+        ConsensusFork.Deneb:
       # A state is optimistic iff the block which created it is
       withState(state):
         # The block root which created the state at slot `n` is at slot `n-1`
@@ -289,9 +297,9 @@ proc getBlockOptimistic*(node: BeaconNode,
                                ForkedSignedBeaconBlock): Option[bool] =
   if node.currentSlot().epoch() >= node.dag.cfg.BELLATRIX_FORK_EPOCH:
     case blck.kind
-    of BeaconBlockFork.Phase0, BeaconBlockFork.Altair:
+    of ConsensusFork.Phase0, ConsensusFork.Altair:
       some[bool](false)
-    of BeaconBlockFork.Bellatrix, BeaconBlockFork.Capella, BeaconBlockFork.EIP4844:
+    of ConsensusFork.Bellatrix, ConsensusFork.Capella, ConsensusFork.Deneb:
       some[bool](node.dag.is_optimistic(blck.root))
   else:
     none[bool]()
@@ -299,9 +307,9 @@ proc getBlockOptimistic*(node: BeaconNode,
 proc getBlockRefOptimistic*(node: BeaconNode, blck: BlockRef): bool =
   let blck = node.dag.getForkedBlock(blck.bid).get()
   case blck.kind
-  of BeaconBlockFork.Phase0, BeaconBlockFork.Altair:
+  of ConsensusFork.Phase0, ConsensusFork.Altair:
     false
-  of BeaconBlockFork.Bellatrix, BeaconBlockFork.Capella, BeaconBlockFork.EIP4844:
+  of ConsensusFork.Bellatrix, ConsensusFork.Capella, ConsensusFork.Deneb:
     node.dag.is_optimistic(blck.root)
 
 const

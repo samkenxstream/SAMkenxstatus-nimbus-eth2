@@ -51,7 +51,7 @@ proc pollForValidatorIndices*(vc: ValidatorClientRef) {.async.} =
   var offset = 0
 
   while offset < len(validatorIdents):
-    let arraySize = min(MaximumValidatorIds, len(validatorIdents))
+    let arraySize = min(ClientMaximumValidatorIds, len(validatorIdents))
 
     let idents =
       block:
@@ -65,8 +65,9 @@ proc pollForValidatorIndices*(vc: ValidatorClientRef) {.async.} =
     let res =
       try:
         await vc.getValidators(idents, ApiStrategyKind.First)
-      except ValidatorApiError:
-        error "Unable to get head state's validator information"
+      except ValidatorApiError as exc:
+        warn "Unable to get head state's validator information",
+              reason = exc.getFailureReason()
         return
       except CancelledError as exc:
         debug "Validator's indices processing was interrupted"
@@ -87,17 +88,21 @@ proc pollForValidatorIndices*(vc: ValidatorClientRef) {.async.} =
     list: seq[AttachedValidator]
 
   for item in validators:
-    var validator = vc.attachedValidators[].getValidator(item.validator.pubkey)
-    if isNil(validator):
+    let validator = vc.attachedValidators[].getValidator(item.validator.pubkey)
+    if validator.isNone():
       missing.add(validatorLog(item.validator.pubkey, item.index))
     else:
-      validator.updateValidator(item.index, item.validator.activation_epoch)
+      validator.get().updateValidator(Opt.some ValidatorAndIndex(
+        index: item.index,
+        validator: item.validator))
       updated.add(validatorLog(item.validator.pubkey, item.index))
-      list.add(validator)
+      list.add(validator.get())
 
   if len(updated) > 0:
-    info "Validator indices updated", missing_validators = len(missing),
-         updated_validators = len(updated)
+    info "Validator indices updated",
+      pending = len(validatorIdents) - len(updated),
+      missing = len(missing),
+      updated = len(updated)
     trace "Validator indices update dump", missing_validators = missing,
           updated_validators = updated
     vc.indicesAvailable.fire()
@@ -119,7 +124,9 @@ proc pollForAttesterDuties*(vc: ValidatorClientRef,
 
   var offset = 0
   while offset < len(validatorIndices):
-    let arraySize = min(MaximumValidatorIds, len(validatorIndices))
+    let arraySize = min(DutiesMaximumValidatorIds, len(validatorIndices))
+    # We use `DutiesMaximumValidatorIds` here because validator ids are sent
+    # in HTTP request body and NOT in HTTP request headers.
     let indices =
       block:
         var res = newSeq[ValidatorIndex](arraySize)
@@ -132,8 +139,9 @@ proc pollForAttesterDuties*(vc: ValidatorClientRef,
     let res =
       try:
         await vc.getAttesterDuties(epoch, indices, ApiStrategyKind.First)
-      except ValidatorApiError:
-        error "Unable to get attester duties", epoch = epoch
+      except ValidatorApiError as exc:
+        warn "Unable to get attester duties", epoch = epoch,
+             reason = exc.getFailureReason()
         return 0
       except CancelledError as exc:
         debug "Attester duties processing was interrupted"
@@ -192,7 +200,9 @@ proc pollForAttesterDuties*(vc: ValidatorClientRef,
     var pendingRequests: seq[Future[SignatureResult]]
     var validators: seq[AttachedValidator]
     for item in addOrReplaceItems:
-      let validator = vc.attachedValidators[].getValidator(item.duty.pubkey)
+      let validator =
+          vc.attachedValidators[].getValidator(item.duty.pubkey).valueOr:
+        continue
       let fork = vc.forkAtEpoch(item.duty.slot.epoch)
       let future = validator.getSlotSignature(
         fork, genesisRoot, item.duty.slot)
@@ -215,7 +225,7 @@ proc pollForAttesterDuties*(vc: ValidatorClientRef,
         if fut.done():
           let sigRes = fut.read()
           if sigRes.isErr():
-            error "Unable to create slot signature using remote signer",
+            warn "Unable to create slot signature using remote signer",
                   validator = shortLog(validators[index]),
                   error_msg = sigRes.error()
             DutyAndProof.init(item.epoch, currentRoot.get(), item.duty,
@@ -255,14 +265,17 @@ proc pollForSyncCommitteeDuties*(vc: ValidatorClientRef,
 
   while offset < len(validatorIndices):
     let
-      arraySize = min(MaximumValidatorIds, remainingItems)
+      arraySize = min(DutiesMaximumValidatorIds, remainingItems)
+      # We use `DutiesMaximumValidatorIds` here because validator ids are sent
+      # in HTTP request body and NOT in HTTP request headers.
       indices = validatorIndices[offset ..< (offset + arraySize)]
 
       res =
         try:
           await vc.getSyncCommitteeDuties(epoch, indices, ApiStrategyKind.First)
-        except ValidatorApiError:
-          error "Unable to get sync committee duties", epoch = epoch
+        except ValidatorApiError as exc:
+          warn "Unable to get sync committee duties", epoch = epoch,
+               reason = exc.getFailureReason()
           return 0
         except CancelledError as exc:
           debug "Sync committee duties processing was interrupted"
@@ -384,9 +397,9 @@ proc pollForAttesterDuties*(vc: ValidatorClientRef) {.async.} =
       if len(subscriptions) > 0:
         let res = await vc.prepareBeaconCommitteeSubnet(subscriptions)
         if res == 0:
-          error "Failed to subscribe validators to beacon committee subnets",
-                slot = currentSlot, epoch = currentEpoch,
-                subscriptions_count = len(subscriptions)
+          warn "Failed to subscribe validators to beacon committee subnets",
+               slot = currentSlot, epoch = currentEpoch,
+               subscriptions_count = len(subscriptions)
 
     vc.pruneAttesterDuties(currentEpoch)
 
@@ -455,9 +468,9 @@ proc pollForSyncCommitteeDuties* (vc: ValidatorClientRef) {.async.} =
       if len(subscriptions) > 0:
         let res = await vc.prepareSyncCommitteeSubnets(subscriptions)
         if res != 0:
-          error "Failed to subscribe validators to sync committee subnets",
-                slot = currentSlot, epoch = currentEpoch,
-                subscriptions_count = len(subscriptions)
+          warn "Failed to subscribe validators to sync committee subnets",
+               slot = currentSlot, epoch = currentEpoch,
+               subscriptions_count = len(subscriptions)
 
       vc.pruneSyncCommitteeDuties(currentSlot)
 
@@ -492,9 +505,9 @@ proc pollForBeaconProposers*(vc: ValidatorClientRef) {.async.} =
         else:
           debug "No relevant proposer duties received", slot = currentSlot,
                 duties_count = len(duties)
-      except ValidatorApiError:
-        debug "Unable to get proposer duties", slot = currentSlot,
-              epoch = currentEpoch
+      except ValidatorApiError as exc:
+        warn "Unable to get proposer duties", slot = currentSlot,
+             epoch = currentEpoch, reason = exc.getFailureReason()
       except CancelledError as exc:
         debug "Proposer duties processing was interrupted"
         raise exc
@@ -521,7 +534,7 @@ proc prepareBeaconProposers*(service: DutiesServiceRef) {.async.} =
         except ValidatorApiError as exc:
           warn "Unable to prepare beacon proposers", slot = currentSlot,
                 epoch = currentEpoch, err_name = exc.name,
-                err_msg = exc.msg
+                err_msg = exc.msg, reason = exc.getFailureReason()
           0
         except CancelledError as exc:
           debug "Beacon proposer preparation processing was interrupted"
@@ -565,7 +578,7 @@ proc registerValidators*(service: DutiesServiceRef) {.async.} =
         except ValidatorApiError as exc:
           warn "Unable to register validators", slot = currentSlot,
                 fork = genesisFork, err_name = exc.name,
-                err_msg = exc.msg
+                err_msg = exc.msg, reason = exc.getFailureReason()
           0
         except CancelledError as exc:
           debug "Validator registration was interrupted", slot = currentSlot,

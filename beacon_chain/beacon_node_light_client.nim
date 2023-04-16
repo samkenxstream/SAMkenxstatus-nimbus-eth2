@@ -5,20 +5,15 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
-  chronicles,
+  chronicles, web3/engine_api_types,
   ./beacon_node
 
 logScope: topics = "beacnde"
 
 func shouldSyncOptimistically*(node: BeaconNode, wallSlot: Slot): bool =
-  if node.eth1Monitor == nil:
-    return false
   let optimisticHeader = node.lightClient.optimisticHeader
   withForkyHeader(optimisticHeader):
     when lcDataFork > LightClientDataFork.None:
@@ -44,22 +39,19 @@ proc initLightClient*(
 
   let
     optimisticHandler = proc(signedBlock: ForkedMsgTrustedSignedBeaconBlock):
-        Future[void] {.async.} =
+                             Future[void] {.async.} =
       info "New LC optimistic block",
         opt = signedBlock.toBlockId(),
         dag = node.dag.head.bid,
         wallSlot = node.currentSlot
       withBlck(signedBlock):
-        when stateFork == BeaconStateFork.EIP4844:
-          debugRaiseAssert $eip4844ImplementationMissing & ": beacon_node_light_client.nim:initLightClient"
-        elif stateFork >= BeaconStateFork.Bellatrix:
+        when consensusFork >= ConsensusFork.Bellatrix:
           if blck.message.is_execution_block:
             template payload(): auto = blck.message.body.execution_payload
 
-            let eth1Monitor = node.eth1Monitor
-            if eth1Monitor != nil and not payload.block_hash.isZero:
+            if not payload.block_hash.isZero:
               # engine_newPayloadV1
-              discard await eth1Monitor.newExecutionPayload(payload)
+              discard await node.elManager.newExecutionPayload(payload)
 
               # Retain optimistic head for other `forkchoiceUpdated` callers.
               # May temporarily block `forkchoiceUpdatedV1` calls, e.g., Geth:
@@ -72,10 +64,11 @@ proc initLightClient*(
 
               # engine_forkchoiceUpdatedV1
               let beaconHead = node.attestationPool[].getBeaconHead(nil)
-              discard await eth1Monitor.runForkchoiceUpdated(
-                headBlockRoot = payload.block_hash,
-                safeBlockRoot = beaconHead.safeExecutionPayloadHash,
-                finalizedBlockRoot = beaconHead.finalizedExecutionPayloadHash)
+              discard await node.elManager.forkchoiceUpdated(
+                headBlockHash = payload.block_hash,
+                safeBlockHash = beaconHead.safeExecutionPayloadHash,
+                finalizedBlockHash = beaconHead.finalizedExecutionPayloadHash,
+                payloadAttributes = NoPayloadAttributes)
           else: discard
 
     optimisticProcessor = initOptimisticProcessor(
@@ -158,7 +151,7 @@ proc updateLightClientFromDag*(node: BeaconNode) =
     return
   var header {.noinit.}: ForkedLightClientHeader
   withBlck(bdata):
-    const lcDataFork = lcDataForkAtStateFork(stateFork)
+    const lcDataFork = lcDataForkAtConsensusFork(consensusFork)
     when lcDataFork > LightClientDataFork.None:
       header = ForkedLightClientHeader(kind: lcDataFork)
       header.forky(lcDataFork) = blck.toLightClientHeader(lcDataFork)

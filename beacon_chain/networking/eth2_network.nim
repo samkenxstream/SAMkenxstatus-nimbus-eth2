@@ -5,10 +5,7 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   # Std lib
@@ -174,7 +171,7 @@ type
   MounterProc* = proc(network: Eth2Node) {.gcsafe, raises: [Defect, CatchableError].}
   MessageContentPrinter* = proc(msg: pointer): string {.gcsafe, raises: [Defect].}
 
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#goodbye
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#goodbye
   DisconnectionReason* = enum
     # might see other values on the wire!
     ClientShutDown = 1
@@ -207,8 +204,8 @@ type
   Eth2NetworkingError = object
     case kind*: Eth2NetworkingErrorKind
     of ReceivedErrorResponse:
-      responseCode: ResponseCode
-      errorMsg: string
+      responseCode*: ResponseCode
+      errorMsg*: string
     else:
       discard
 
@@ -218,16 +215,6 @@ type
 
   NetRes*[T] = Result[T, Eth2NetworkingError]
     ## This is type returned from all network requests
-
-func phase0metadata*(node: Eth2Node): phase0.MetaData =
-  phase0.MetaData(
-    seq_number: node.metadata.seq_number,
-    attnets: node.metadata.attnets)
-
-func toAltairMetadata(phase0: phase0.MetaData): altair.MetaData =
-  altair.MetaData(
-    seq_number: phase0.seq_number,
-    attnets: phase0.attnets)
 
 const
   clientId* = "Nimbus beacon node " & fullVersionStr
@@ -802,29 +789,26 @@ proc uncompressFramedStream(conn: Connection,
 func chunkMaxSize[T](): uint32 =
   # compiler error on (T: type) syntax...
   when T is ForkySignedBeaconBlock:
-    when T is phase0.SignedBeaconBlock or T is altair.SignedBeaconBlock:
-      MAX_CHUNK_SIZE
-    elif T is bellatrix.SignedBeaconBlock or T is capella.SignedBeaconBlock:
+    when T is phase0.SignedBeaconBlock or T is altair.SignedBeaconBlock or
+         T is bellatrix.SignedBeaconBlock or T is capella.SignedBeaconBlock or
+         T is deneb.SignedBeaconBlock:
       MAX_CHUNK_SIZE_BELLATRIX
     else:
       {.fatal: "what's the chunk size here?".}
   elif isFixedSize(T):
     uint32 fixedPortionSize(T)
   else:
-    MAX_CHUNK_SIZE
-
-func maxGossipMaxSize(): auto {.compileTime.} =
-  max(GOSSIP_MAX_SIZE, GOSSIP_MAX_SIZE_BELLATRIX)
+    MAX_CHUNK_SIZE_BELLATRIX
 
 from ../spec/datatypes/capella import SignedBeaconBlock
-from ../spec/datatypes/eip4844 import SignedBeaconBlockAndBlobsSidecar
+from ../spec/datatypes/deneb import SignedBeaconBlock
 
 template gossipMaxSize(T: untyped): uint32 =
   const maxSize = static:
     when isFixedSize(T):
       fixedPortionSize(T)
     elif T is bellatrix.SignedBeaconBlock or T is capella.SignedBeaconBlock or
-         T is eip4844.SignedBeaconBlockAndBlobsSidecar:
+         T is deneb.SignedBeaconBlock:
       GOSSIP_MAX_SIZE_BELLATRIX
     # TODO https://github.com/status-im/nim-ssz-serialization/issues/20 for
     # Attestation, AttesterSlashing, and SignedAggregateAndProof, which all
@@ -833,10 +817,10 @@ template gossipMaxSize(T: untyped): uint32 =
     elif T is Attestation or T is AttesterSlashing or
          T is SignedAggregateAndProof or T is phase0.SignedBeaconBlock or
          T is altair.SignedBeaconBlock or T is SomeForkyLightClientObject:
-      GOSSIP_MAX_SIZE
+      GOSSIP_MAX_SIZE_BELLATRIX
     else:
       {.fatal: "unknown type " & name(T).}
-  static: doAssert maxSize <= maxGossipMaxSize()
+  static: doAssert maxSize <= GOSSIP_MAX_SIZE_BELLATRIX
   maxSize.uint32
 
 proc readChunkPayload*(conn: Connection, peer: Peer,
@@ -2088,15 +2072,10 @@ proc updatePeerMetadata(node: Eth2Node, peerId: PeerId) {.async.} =
   let newMetadata =
     try:
       tryGet(await peer.getMetadata_v2())
-    except CatchableError:
-      let metadataV1 =
-        try: tryGet(await peer.getMetaData())
-        except CatchableError as exc:
-          debug "Failed to retrieve metadata from peer!", peerId, msg=exc.msg
-          peer.failedMetadataRequests.inc()
-          return
-
-      toAltairMetadata(metadataV1)
+    except CatchableError as exc:
+      debug "Failed to retrieve metadata from peer!", peerId, msg=exc.msg
+      peer.failedMetadataRequests.inc()
+      return
 
   peer.metadata = some(newMetadata)
   peer.failedMetadataRequests = 0
@@ -2172,7 +2151,7 @@ proc getRandomNetKeys*(rng: var HmacDrbgContext): NetKeyPair =
     quit QuitFailure
   initNetKeys(privKey)
 
-proc getPersistentNetKeys(
+proc getPersistentNetKeys*(
     rng: var HmacDrbgContext,
     dataDir, netKeyFile: string,
     netKeyInsecurePassword: bool,
@@ -2235,22 +2214,13 @@ proc getPersistentNetKeys*(
     rng.getPersistentNetKeys(
       string(config.dataDir), config.netKeyFile, config.netKeyInsecurePassword,
       allowLoadExisting = true)
-
-  of BNStartUpCmd.createTestnet:
-    if config.netKeyFile == "random":
-      fatal "Could not create testnet using `random` network key"
-      quit QuitFailure
-
-    rng.getPersistentNetKeys(
-      string(config.dataDir), config.netKeyFile, config.netKeyInsecurePassword,
-      allowLoadExisting = false)
   else:
     rng.getRandomNetKeys()
 
 func gossipId(
     data: openArray[byte], phase0Prefix, topic: string): seq[byte] =
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#topics-and-messages
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/altair/p2p-interface.md#topics-and-messages
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#topics-and-messages
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/altair/p2p-interface.md#topics-and-messages
   const
     MESSAGE_DOMAIN_INVALID_SNAPPY = [0x00'u8, 0x00, 0x00, 0x00]
     MESSAGE_DOMAIN_VALID_SNAPPY = [0x01'u8, 0x00, 0x00, 0x00]
@@ -2324,7 +2294,7 @@ proc createEth2Node*(rng: ref HmacDrbgContext,
     try:
       # This doesn't have to be a tight bound, just enough to avoid denial of
       # service attacks.
-      let decoded = snappy.decode(m.data, maxGossipMaxSize())
+      let decoded = snappy.decode(m.data, GOSSIP_MAX_SIZE_BELLATRIX)
       ok(gossipId(decoded, phase0Prefix, topic))
     except CatchableError:
       err(ValidationResult.Reject)
@@ -2381,7 +2351,7 @@ proc createEth2Node*(rng: ref HmacDrbgContext,
       sign = false,
       verifySignature = false,
       anonymize = true,
-      maxMessageSize = maxGossipMaxSize(),
+      maxMessageSize = GOSSIP_MAX_SIZE_BELLATRIX,
       parameters = params)
 
   switch.mount(pubsub)
@@ -2492,7 +2462,7 @@ proc gossipEncode(msg: auto): seq[byte] =
   let uncompressed = SSZ.encode(msg)
   # This function only for messages we create. A message this large amounts to
   # an internal logic error.
-  doAssert uncompressed.len <= maxGossipMaxSize()
+  doAssert uncompressed.len <= GOSSIP_MAX_SIZE_BELLATRIX
 
   snappy.encode(uncompressed)
 
@@ -2515,7 +2485,7 @@ proc broadcast(node: Eth2Node, topic: string, msg: auto):
 
 proc subscribeAttestationSubnets*(
     node: Eth2Node, subnets: AttnetBits, forkDigest: ForkDigest) =
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#attestations-and-aggregation
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#attestations-and-aggregation
   # Nimbus won't score attestation subnets for now, we just rely on block and
   # aggregate which are more stable and reliable
 
@@ -2526,7 +2496,7 @@ proc subscribeAttestationSubnets*(
 
 proc unsubscribeAttestationSubnets*(
     node: Eth2Node, subnets: AttnetBits, forkDigest: ForkDigest) =
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#attestations-and-aggregation
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#attestations-and-aggregation
   # Nimbus won't score attestation subnets for now; we just rely on block and
   # aggregate which are more stable and reliable
 
@@ -2535,15 +2505,15 @@ proc unsubscribeAttestationSubnets*(
       node.unsubscribe(getAttestationTopic(forkDigest, SubnetId(subnet_id)))
 
 proc updateStabilitySubnetMetadata*(node: Eth2Node, attnets: AttnetBits) =
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#metadata
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#metadata
   if node.metadata.attnets == attnets:
     return
 
   node.metadata.seq_number += 1
   node.metadata.attnets = attnets
 
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#phase-0-attestation-subnet-stability
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#attestation-subnet-bitfield
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#phase-0-attestation-subnet-stability
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#attestation-subnet-bitfield
   let res = node.discovery.updateRecord({
     enrAttestationSubnetsField: SSZ.encode(node.metadata.attnets)
   })
@@ -2555,7 +2525,7 @@ proc updateStabilitySubnetMetadata*(node: Eth2Node, attnets: AttnetBits) =
     debug "Stability subnets changed; updated ENR attnets", attnets
 
 proc updateSyncnetsMetadata*(node: Eth2Node, syncnets: SyncnetBits) =
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/altair/validator.md#sync-committee-subnet-stability
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/altair/validator.md#sync-committee-subnet-stability
   if node.metadata.syncnets == syncnets:
     return
 
@@ -2596,7 +2566,7 @@ proc broadcastAttestation*(
     node: Eth2Node, subnet_id: SubnetId, attestation: Attestation):
     Future[SendResult] =
   # Regardless of the contents of the attestation,
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/altair/p2p-interface.md#transitioning-the-gossip
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/altair/p2p-interface.md#transitioning-the-gossip
   # implies that pre-fork, messages using post-fork digests might be
   # ignored, whilst post-fork, there is effectively a seen_ttl-based
   # timer unsubscription point that means no new pre-fork-forkdigest
@@ -2622,6 +2592,13 @@ proc broadcastProposerSlashing*(
   let topic = getProposerSlashingsTopic(
     node.forkDigestAtEpoch(node.getWallEpoch))
   node.broadcast(topic, slashing)
+
+proc broadcastBlsToExecutionChange*(
+    node: Eth2Node, bls_to_execution_change: SignedBLSToExecutionChange):
+    Future[SendResult] =
+  let topic = getBlsToExecutionChangeTopic(
+    node.forkDigestAtEpoch(node.getWallEpoch))
+  node.broadcast(topic, bls_to_execution_change)
 
 proc broadcastAggregateAndProof*(
     node: Eth2Node, proof: SignedAggregateAndProof): Future[SendResult] =
@@ -2649,22 +2626,12 @@ proc broadcastBeaconBlock*(
   let topic = getBeaconBlocksTopic(node.forkDigests.capella)
   node.broadcast(topic, blck)
 
-from ../spec/datatypes/eip4844 import SignedBeaconBlock
-
 proc broadcastBeaconBlock*(
-    node: Eth2Node, blck: eip4844.SignedBeaconBlock): Future[SendResult] =
-  debugRaiseAssert $eip4844ImplementationMissing & ": eth2_network.nim:broadcastBeaconBlock EIP4844 uses different approach (1)"
+    node: Eth2Node, blck: deneb.SignedBeaconBlock): Future[SendResult] =
+  let topic = getBeaconBlocksTopic(node.forkDigests.deneb)
+  node.broadcast(topic, blck)
 
-proc broadcastBeaconBlock*(
-    node: Eth2Node, forked: ForkedSignedBeaconBlock): Future[SendResult] =
-  withBlck(forked):
-    when stateFork == BeaconStateFork.EIP4844:
-      debugRaiseAssert $eip4844ImplementationMissing & ": eth2_network.nim:broadcastBeaconBlock EIP4844 uses different approach (2)"
-      let f = newFuture[SendResult]()
-      f.fail(new CatchableError)
-      f
-    else:
-      node.broadcastBeaconBlock(blck)
+from ../spec/datatypes/deneb import SignedBeaconBlock
 
 proc broadcastSyncCommitteeMessage*(
     node: Eth2Node, msg: SyncCommitteeMessage,

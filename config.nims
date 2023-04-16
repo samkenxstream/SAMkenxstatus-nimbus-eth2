@@ -111,8 +111,8 @@ if defined(disableMarchNative):
       switch("passL", "-mssse3")
 elif defined(macosx) and defined(arm64):
   # Apple's Clang can't handle "-march=native" on M1: https://github.com/status-im/nimbus-eth2/issues/2758
-  switch("passC", "-mcpu=apple-a14")
-  switch("passL", "-mcpu=apple-a14")
+  switch("passC", "-mcpu=apple-m1")
+  switch("passL", "-mcpu=apple-m1")
 else:
   switch("passC", "-march=native")
   switch("passL", "-march=native")
@@ -182,9 +182,13 @@ switch("warning", "ObservableStores:off")
 # Too many false positives for "Warning: method has lock level <unknown>, but another method has 0 [LockLevel]"
 switch("warning", "LockLevel:off")
 
+# Too many right now to read compiler output. Warnings are legitimate, but
+# should be fixed out-of-band of `unstable` branch.
+if (NimMajor, NimMinor, NimPatch) >= (1, 6, 11):
+  switch("warning", "BareExcept:off")
+
 # Too many of these because of Defect compat in 1.2
-if (NimMajor, NimMinor) >= (1, 6):
-  switch("hint", "XCannotRaiseY:off")
+switch("hint", "XCannotRaiseY:off")
 
 # Useful for Chronos metrics.
 #--define:chronosFutureTracking

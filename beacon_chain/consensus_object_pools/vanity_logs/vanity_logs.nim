@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2022 Status Research & Development GmbH
+# Copyright (c) 2022-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   std/os,
@@ -28,6 +25,10 @@ type
     # Gets displayed on upgrade to Capella. May be displayed multiple times
     # in case of chain reorgs around the upgrade.
     onUpgradeToCapella*: LogProc
+
+    # Gets displayed on when a BLS to execution change message for a validator
+    # known by this node appears in a head block
+    onKnownBlsToExecutionChange*: LogProc
 
 # Created by http://beatscribe.com/ (beatscribe#1008 on Discord)
 # These need to be the main body of the log not to be reformatted or escaped.

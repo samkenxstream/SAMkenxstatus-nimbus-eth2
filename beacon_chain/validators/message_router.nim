@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   stew/results,
@@ -20,7 +17,7 @@ import
   ../gossip_processing/eth2_processor,
   ../networking/eth2_network,
   ./activity_metrics,
-  ../spec/datatypes/eip4844
+  ../spec/datatypes/deneb
 
 export eth2_processor, eth2_network
 
@@ -83,20 +80,18 @@ template getCurrentBeaconTime(router: MessageRouter): BeaconTime =
 
 type RouteBlockResult* = Result[Opt[BlockRef], cstring]
 proc routeSignedBeaconBlock*(
-    router: ref MessageRouter, blckAndBlobs: ForkySignedBeaconBlockMaybeBlobs):
+    router: ref MessageRouter, blck: ForkySignedBeaconBlock):
     Future[RouteBlockResult] {.async.} =
   ## Validate and broadcast beacon block, then add it to the block database
   ## Returns the new Head when block is added successfully to dag, none when
   ## block passes validation but is not added, and error otherwise
-  let
-    wallTime = router[].getCurrentBeaconTime()
-    blck = toSignedBeaconBlock(blckAndBlobs)
+  let wallTime = router[].getCurrentBeaconTime()
 
   # Start with a quick gossip validation check such that broadcasting the
   # block doesn't get the node into trouble
   block:
     let res = validateBeaconBlock(
-      router[].dag, router[].quarantine, blckAndBlobs, wallTime, {})
+      router[].dag, router[].quarantine, blck, wallTime, {})
 
     if not res.isGoodForSending():
       warn "Block failed validation",
@@ -110,7 +105,8 @@ proc routeSignedBeaconBlock*(
     # The block passed basic gossip validation - we can "safely" broadcast it
     # now. In fact, per the spec, we should broadcast it even if it later fails
     # to apply to our state.
-    res = await router[].network.broadcastBeaconBlock(blck)
+
+  let res = await router[].network.broadcastBeaconBlock(blck)
 
   if res.isOk():
     beacon_blocks_sent.inc()
@@ -124,9 +120,8 @@ proc routeSignedBeaconBlock*(
       blockRoot = shortLog(blck.root), blck = shortLog(blck.message),
       signature = shortLog(blck.signature), error = res.error()
 
-  let
-    newBlockRef = await router[].blockProcessor.storeBlock(
-      MsgSource.api, sendTime, blck, Opt.none(eip4844.BlobsSidecar))
+  let newBlockRef = await router[].blockProcessor.storeBlock(
+    MsgSource.api, sendTime, blck, BlobSidecars @[])
 
   # The boolean we return tells the caller whether the block was integrated
   # into the chain
@@ -276,7 +271,7 @@ proc routeSyncCommitteeMessages*(
     router: ref MessageRouter, msgs: seq[SyncCommitteeMessage]):
     Future[seq[SendResult]] {.async.} =
   return withState(router[].dag.headState):
-    when stateFork >= BeaconStateFork.Altair:
+    when consensusFork >= ConsensusFork.Altair:
       var statuses = newSeq[Option[SendResult]](len(msgs))
 
       let
@@ -450,5 +445,36 @@ proc routeProposerSlashing*(
   else: # "no broadcast" is not a fatal error
     notice "Proposer slashing not sent",
       slashing = shortLog(slashing), error = res.error()
+
+  return ok()
+
+proc routeBlsToExecutionChange*(
+    router: ref MessageRouter,
+    bls_to_execution_change: SignedBLSToExecutionChange):
+    Future[SendResult] {.async.} =
+  block:
+    let res = await router.processor.processBlsToExecutionChange(
+      MsgSource.api, bls_to_execution_change)
+    if not res.isGoodForSending:
+      warn "BLS to execution change request failed validation",
+            change = shortLog(bls_to_execution_change),
+            error = res.error()
+      return err(res.error()[1])
+
+  if  router[].getCurrentBeaconTime().slotOrZero.epoch <
+      router[].processor[].dag.cfg.CAPELLA_FORK_EPOCH:
+    # Broadcast hasn't failed, it just hasn't happened; desire seems to be to
+    # allow queuing up BLS to execution changes.
+    return ok()
+
+  let res = await router[].network.broadcastBlsToExecutionChange(
+    bls_to_execution_change)
+  if res.isOk():
+    notice "BLS to execution change sent",
+      bls_to_execution_change = shortLog(bls_to_execution_change)
+  else: # "no broadcast" is not a fatal error
+    notice "BLS to execution change not sent",
+      bls_to_execution_change = shortLog(bls_to_execution_change),
+      error = res.error()
 
   return ok()

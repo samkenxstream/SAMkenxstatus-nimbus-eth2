@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 
 import
@@ -29,6 +26,7 @@ import
   ./spec/datatypes/base,
   ./networking/network_metadata,
   ./validators/slashing_protection_common,
+  ./eth1/el_conf,
   ./filepath
 
 from consensus_object_pools/block_pools_types_light_client
@@ -38,7 +36,7 @@ export
   uri, nat, enr,
   defaultEth2TcpPort, enabledLogLevel, ValidIpAddress,
   defs, parseCmdArg, completeCmdArg, network_metadata,
-  network, BlockHashOrNumber,
+  el_conf, network, BlockHashOrNumber,
   confTomlDefs, confTomlNet, confTomlUri
 
 declareGauge network_name, "network name", ["name"]
@@ -51,6 +49,7 @@ const
   defaultSigningNodeRequestTimeout* = 60
   defaultBeaconNode* = "http://127.0.0.1:" & $defaultEth2RestPort
   defaultBeaconNodeUri* = parseUri(defaultBeaconNode)
+  defaultGasLimit* = 30_000_000
 
   defaultListenAddressDesc* = $defaultListenAddress
   defaultAdminListenAddressDesc* = $defaultAdminListenAddress
@@ -66,7 +65,6 @@ else:
 type
   BNStartUpCmd* {.pure.} = enum
     noCommand
-    createTestnet
     deposits
     wallets
     record
@@ -119,9 +117,14 @@ type
 
   DeploymentPhase* {.pure.} = enum
     Devnet = "devnet"
+    CapellaReady = "capella"
     Testnet = "testnet"
     Mainnet = "mainnet"
     None = "none"
+
+  ImportMethod* {.pure.} = enum
+    Normal = "normal"
+    SingleSalt = "single-salt"
 
   BeaconNodeConf* = object
     configFile* {.
@@ -173,15 +176,23 @@ type
       desc: "A directory containing era files"
       name: "era-dir" .}: Option[InputDir]
 
-    web3Urls* {.
-      desc: "One or more execution layer Web3 provider URLs"
-      name: "web3-url" .}: seq[string]
-
     web3ForcePolling* {.
       hidden
+      desc: "Force the use of polling when determining the head block of Eth1 (obsolete)"
+      name: "web3-force-polling" .}: Option[bool]
+
+    web3Urls* {.
+      desc: "One or more execution layer Engine API URLs"
+      name: "web3-url" .}: seq[EngineApiUrlConfigValue]
+
+    elUrls* {.
+      desc: "One or more execution layer Engine API URLs"
+      name: "el" .}: seq[EngineApiUrlConfigValue]
+
+    noEl* {.
       defaultValue: false
-      desc: "Force the use of polling when determining the head block of Eth1"
-      name: "web3-force-polling" .}: bool
+      desc: "Don't use an EL. The node will remain optimistically synced and won't be able to perform validator duties"
+      name: "no-el" .}: bool
 
     optimistic* {.
       hidden # deprecated > 22.12
@@ -224,21 +235,15 @@ type
       desc: "The slashing DB flavour to use"
       name: "slashing-db-kind" .}: SlashingDbKind
 
-    mergeAtEpoch* {.
-      hidden
-      desc: "Debugging argument not for external use; may be removed at any time"
-      defaultValue: FAR_FUTURE_EPOCH
-      name: "merge-at-epoch-debug-internal" .}: uint64
-
     numThreads* {.
       defaultValue: 0,
       desc: "Number of worker threads (\"0\" = use as many threads as there are CPU cores available)"
       name: "num-threads" .}: int
 
-    # https://github.com/ethereum/execution-apis/blob/v1.0.0-beta.1/src/engine/authentication.md#key-distribution
+    # https://github.com/ethereum/execution-apis/blob/v1.0.0-beta.2/src/engine/authentication.md#key-distribution
     jwtSecret* {.
       desc: "A file containing the hex-encoded 256 bit secret key to be used for verifying/generating JWT tokens"
-      name: "jwt-secret" .}: Option[string]
+      name: "jwt-secret" .}: Option[InputFile]
 
     case cmd* {.
       command
@@ -320,6 +325,10 @@ type
       finalizedCheckpointState* {.
         desc: "SSZ file specifying a recent finalized state"
         name: "finalized-checkpoint-state" .}: Option[InputFile]
+
+      finalizedDepositTreeSnapshot* {.
+        desc: "SSZ file specifying a recent finalized EIP-4881 deposit tree snapshot"
+        name: "finalized-deposit-tree-snapshot" .}: Option[InputFile]
 
       finalizedCheckpointBlock* {.
         hidden
@@ -454,9 +463,12 @@ type
         name: "rest-max-body-size" .}: Natural
 
       restMaxRequestHeadersSize* {.
-        defaultValue: 64
+        defaultValue: 128
         desc: "Maximum size of REST request headers (kilobytes)"
         name: "rest-max-headers-size" .}: Natural
+        ## NOTE: If you going to adjust this value please check value
+        ## ``ClientMaximumValidatorIds`` and comments in
+        ## `spec/eth2_apis/rest_types.nim`. This values depend on each other.
 
       keymanagerEnabled* {.
         desc: "Enable the REST keymanager API"
@@ -540,8 +552,8 @@ type
       deploymentPhase* {.
         hidden
         desc: "Configures the deployment phase"
-        defaultValue: DeploymentPhase.Mainnet
-        defaultValueDesc: $DeploymentPhase.Mainnet
+        defaultValue: DeploymentPhase.CapellaReady
+        defaultValueDesc: $DeploymentPhase.CapellaReady
         name: "deployment-phase" .}: DeploymentPhase
 
       terminalTotalDifficultyOverride* {.
@@ -560,7 +572,7 @@ type
 
       validatorMonitorDetails* {.
         desc: "Publish detailed metrics for each validator individually - may incur significant overhead with large numbers of validators"
-        defaultValue: true
+        defaultValue: false
         name: "validator-monitor-details" .}: bool
 
       validatorMonitorTotals* {.
@@ -581,6 +593,11 @@ type
         desc: "Suggested fee recipient"
         name: "suggested-fee-recipient" .}: Option[Address]
 
+      suggestedGasLimit* {.
+        desc: "Suggested gas limit"
+        defaultValue: defaultGasLimit
+        name: "suggested-gas-limit" .}: uint64
+
       payloadBuilderEnable* {.
         desc: "Enable external payload builder"
         defaultValue: false
@@ -592,43 +609,9 @@ type
         name: "payload-builder-url" .}: string
 
       historyMode* {.
-        desc: "Retention strategy for historical data (archive/pruned)"
+        desc: "Retention strategy for historical data (archive/prune)"
         defaultValue: HistoryMode.Archive
         name: "history".}: HistoryMode
-
-    of BNStartUpCmd.createTestnet:
-      testnetDepositsFile* {.
-        desc: "A LaunchPad deposits file for the genesis state validators"
-        name: "deposits-file" .}: InputFile
-
-      totalValidators* {.
-        desc: "The number of validator deposits in the newly created chain"
-        name: "total-validators" .}: uint64
-
-      bootstrapAddress* {.
-        desc: "The public IP address that will be advertised as a bootstrap node for the testnet"
-        defaultValue: init(ValidIpAddress, defaultAdminListenAddress)
-        defaultValueDesc: $defaultAdminListenAddressDesc
-        name: "bootstrap-address" .}: ValidIpAddress
-
-      bootstrapPort* {.
-        desc: "The TCP/UDP port that will be used by the bootstrap node"
-        defaultValue: defaultEth2TcpPort
-        defaultValueDesc: $defaultEth2TcpPortDesc
-        name: "bootstrap-port" .}: Port
-
-      genesisOffset* {.
-        desc: "Seconds from now to add to genesis time"
-        defaultValue: 5
-        name: "genesis-offset" .}: int
-
-      outputGenesis* {.
-        desc: "Output file where to write the initial state snapshot"
-        name: "output-genesis" .}: OutFile
-
-      outputBootstrapFile* {.
-        desc: "Output file with list of bootstrap nodes for the network"
-        name: "output-bootstrap-file" .}: OutFile
 
     of BNStartUpCmd.wallets:
       case walletsCmd* {.command.}: WalletsCmd
@@ -707,10 +690,16 @@ type
           argument
           desc: "A directory with keystores to import" .}: Option[InputDir]
 
+        importMethod* {.
+          desc: "Specifies which import method will be used (" &
+                "normal, single-salt)"
+          defaultValue: ImportMethod.Normal
+          name: "method" .}: ImportMethod
+
       of DepositsCmd.exit:
         exitedValidator* {.
           name: "validator"
-          desc: "Validator index or a public key of the exited validator" .}: string
+          desc: "Validator index, public key or a keystore path of the exited validator" .}: string
 
         exitAtEpoch* {.
           name: "epoch"
@@ -721,6 +710,11 @@ type
           defaultValue: defaultBeaconNode
           defaultValueDesc: $defaultBeaconNodeDesc
           name: "rest-url" .}: string
+
+        printData* {.
+          desc: "Print signed exit message instead of publishing it"
+          defaultValue: false
+          name: "print" .}: bool
 
     of BNStartUpCmd.record:
       case recordCmd* {.command.}: RecordCmd
@@ -883,6 +877,11 @@ type
     suggestedFeeRecipient* {.
       desc: "Suggested fee recipient"
       name: "suggested-fee-recipient" .}: Option[Address]
+
+    suggestedGasLimit* {.
+      desc: "Suggested gas limit"
+      defaultValue: 30_000_000
+      name: "suggested-gas-limit" .}: uint64
 
     keymanagerEnabled* {.
       desc: "Enable the REST keymanager API"
@@ -1114,6 +1113,13 @@ func parseCmdArg*(T: type Checkpoint, input: string): T
 func completeCmdArg*(T: type Checkpoint, input: string): seq[string] =
   return @[]
 
+func parseCmdArg*(T: type Epoch, input: string): T
+                 {.raises: [ValueError, Defect].} =
+  Epoch parseBiggestUInt(input)
+
+func completeCmdArg*(T: type Epoch, input: string): seq[string] =
+  return @[]
+
 func isPrintable(rune: Rune): bool =
   # This can be eventually replaced by the `unicodeplus` package, but a single
   # proc does not justify the extra dependencies at the moment:
@@ -1310,7 +1316,7 @@ func defaultFeeRecipient*(conf: AnyConf): Eth1Address =
 proc loadJwtSecret*(
     rng: var HmacDrbgContext,
     dataDir: string,
-    jwtSecret: Option[string],
+    jwtSecret: Option[InputFile],
     allowCreate: bool): Option[seq[byte]] =
   # Some Web3 endpoints aren't compatible with JWT, but if explicitly chosen,
   # use it regardless.
@@ -1325,8 +1331,18 @@ proc loadJwtSecret*(
   else:
     none(seq[byte])
 
-template loadJwtSecret*(
+proc loadJwtSecret*(
     rng: var HmacDrbgContext,
     config: BeaconNodeConf,
     allowCreate: bool): Option[seq[byte]] =
   rng.loadJwtSecret(string(config.dataDir), config.jwtSecret, allowCreate)
+
+proc engineApiUrls*(config: BeaconNodeConf): seq[EngineApiUrl] =
+  let elUrls = if config.noEl:
+    return newSeq[EngineApiUrl]()
+  elif config.elUrls.len == 0 and config.web3Urls.len == 0:
+    @[defaultEngineApiUrl]
+  else:
+    config.elUrls
+
+  (elUrls & config.web3Urls).toFinalEngineApiUrls(config.jwtSecret)

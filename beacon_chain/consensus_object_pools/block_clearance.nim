@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   chronicles,
@@ -19,7 +16,7 @@ import
   "."/[block_dag, blockchain_dag, blockchain_dag_light_client]
 
 from ../spec/datatypes/capella import asSigVerified, asTrusted, shortLog
-from ../spec/datatypes/eip4844 import asSigVerified, asTrusted, shortLog
+from ../spec/datatypes/deneb import asSigVerified, asTrusted, shortLog
 
 export results, signatures_batch, block_dag, blockchain_dag
 
@@ -107,8 +104,8 @@ proc addResolvedHeadBlock(
     var unrealized: FinalityCheckpoints
     if enableTestFeatures in dag.updateFlags:
       unrealized = withState(state):
-        static: doAssert high(BeaconStateFork) == BeaconStateFork.EIP4844
-        when stateFork >= BeaconStateFork.Altair:
+        static: doAssert high(ConsensusFork) == ConsensusFork.Deneb
+        when consensusFork >= ConsensusFork.Altair:
           forkyState.data.compute_unrealized_finality()
         else:
           forkyState.data.compute_unrealized_finality(cache)
@@ -263,7 +260,7 @@ proc addHeadBlock*(
     var sigs: seq[SignatureSet]
     if (let e = sigs.collectSignatureSets(
         signedBlock, dag.db.immutableValidators,
-        dag.clearanceState, cache); e.isErr()):
+        dag.clearanceState, dag.cfg.genesisFork(), cache); e.isErr()):
       # A PublicKey or Signature isn't on the BLS12-381 curve
       info "Unable to load signature sets",
         err = e.error()

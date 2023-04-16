@@ -22,12 +22,12 @@ suite "Light client" & preset():
     headPeriod = 3.SyncCommitteePeriod
   let
     cfg = block:  # Fork schedule so that each `LightClientDataFork` is covered
-      static: doAssert BeaconStateFork.high == BeaconStateFork.EIP4844
+      static: doAssert ConsensusFork.high == ConsensusFork.Deneb
       var res = defaultRuntimeConfig
       res.ALTAIR_FORK_EPOCH = 1.Epoch
       res.BELLATRIX_FORK_EPOCH = 2.Epoch
-      # $capellaImplementationMissing res.CAPELLA_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 1).Epoch
-      # $eip4844ImplementationMissing res.EIP4844_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 2).Epoch
+      res.CAPELLA_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 1).Epoch
+      res.DENEB_FORK_EPOCH = (EPOCHS_PER_SYNC_COMMITTEE_PERIOD * 2).Epoch
       res
     altairStartSlot = cfg.ALTAIR_FORK_EPOCH.start_slot
 
@@ -55,40 +55,40 @@ suite "Light client" & preset():
       if targetSlot > checkpointSlot and checkpointSlot > dag.head.slot:
         var info: ForkedEpochInfo
         doAssert process_slots(cfg, dag.headState, checkpointSlot,
-                              cache, info, flags = {}).isOk()
+                               cache, info, flags = {}).isOk()
         slot = checkpointSlot
 
       # Create blocks for final few epochs
       let blocks = min(targetSlot - slot, maxAttestedSlotsPerPeriod)
       for blck in makeTestBlocks(dag.headState, cache, blocks.int,
-                                attested, syncCommitteeRatio, cfg):
+                                 attested, syncCommitteeRatio, cfg):
         let added =
           case blck.kind
-          of BeaconBlockFork.Phase0:
+          of ConsensusFork.Phase0:
             const nilCallback = OnPhase0BlockAdded(nil)
             dag.addHeadBlock(verifier, blck.phase0Data, nilCallback)
-          of BeaconBlockFork.Altair:
+          of ConsensusFork.Altair:
             const nilCallback = OnAltairBlockAdded(nil)
             dag.addHeadBlock(verifier, blck.altairData, nilCallback)
-          of BeaconBlockFork.Bellatrix:
+          of ConsensusFork.Bellatrix:
             const nilCallback = OnBellatrixBlockAdded(nil)
             dag.addHeadBlock(verifier, blck.bellatrixData, nilCallback)
-          of BeaconBlockFork.Capella:
+          of ConsensusFork.Capella:
             const nilCallback = OnCapellaBlockAdded(nil)
             dag.addHeadBlock(verifier, blck.capellaData, nilCallback)
-          of BeaconBlockFork.EIP4844:
-            const nilCallback = OnEIP4844BlockAdded(nil)
-            dag.addHeadBlock(verifier, blck.eip4844Data, nilCallback)
+          of ConsensusFork.Deneb:
+            const nilCallback = OnDenebBlockAdded(nil)
+            dag.addHeadBlock(verifier, blck.denebData, nilCallback)
 
         check: added.isOk()
-        dag.updateHead(added[], quarantine)
+        dag.updateHead(added[], quarantine, [])
 
   setup:
     const num_validators = SLOTS_PER_EPOCH
     let
       validatorMonitor = newClone(ValidatorMonitor.init())
       dag = ChainDAGRef.init(
-        cfg, makeTestDB(num_validators), validatorMonitor, {},
+        cfg, makeTestDB(num_validators, cfg = cfg), validatorMonitor, {},
         lcDataConfig = LightClientDataConfig(
           serve: true,
           importMode: LightClientDataImportMode.OnlyNew))
@@ -104,7 +104,7 @@ suite "Light client" & preset():
         finalityUpdate = dag.getLightClientFinalityUpdate
         optimisticUpdate = dag.getLightClientOptimisticUpdate
       check:
-        dag.headState.kind == BeaconStateFork.Phase0
+        dag.headState.kind == ConsensusFork.Phase0
         update.kind == LightClientDataFork.None
         finalityUpdate.kind == LightClientDataFork.None
         optimisticUpdate.kind == LightClientDataFork.None
@@ -117,7 +117,7 @@ suite "Light client" & preset():
         finalityUpdate = dag.getLightClientFinalityUpdate
         optimisticUpdate = dag.getLightClientOptimisticUpdate
       check:
-        dag.headState.kind == BeaconStateFork.Phase0
+        dag.headState.kind == ConsensusFork.Phase0
         update.kind == LightClientDataFork.None
         finalityUpdate.kind == LightClientDataFork.None
         optimisticUpdate.kind == LightClientDataFork.None
@@ -130,7 +130,7 @@ suite "Light client" & preset():
         finalityUpdate = dag.getLightClientFinalityUpdate
         optimisticUpdate = dag.getLightClientOptimisticUpdate
       check:
-        dag.headState.kind == BeaconStateFork.Altair
+        dag.headState.kind == ConsensusFork.Altair
         update.kind == LightClientDataFork.None
         finalityUpdate.kind == LightClientDataFork.None
         optimisticUpdate.kind == LightClientDataFork.None
@@ -237,7 +237,7 @@ suite "Light client" & preset():
     dag.advanceToSlot(finalizedSlot, verifier, quarantine[])
 
     # Initialize new DAG from checkpoint
-    let cpDb = BeaconChainDB.new("", inMemory = true)
+    let cpDb = BeaconChainDB.new("", cfg = cfg, inMemory = true)
     ChainDAGRef.preInit(cpDb, genesisState[])
     ChainDAGRef.preInit(cpDb, dag.headState) # dag.getForkedBlock(dag.head.bid).get)
     let cpDag = ChainDAGRef.init(

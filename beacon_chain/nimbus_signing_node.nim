@@ -34,6 +34,7 @@ type
     config: SigningNodeConf
     attachedValidators: ValidatorPool
     signingServer: SigningNodeServer
+    keystoreCache: KeystoreCacheRef
     keysList: string
 
 proc getRouter*(): RestRouter
@@ -97,13 +98,15 @@ proc loadTLSKey(pathName: InputFile): Result[TLSPrivateKey, cstring] =
 proc initValidators(sn: var SigningNode): bool =
   info "Initializaing validators", path = sn.config.validatorsDir()
   var publicKeyIdents: seq[string]
-  for keystore in listLoadableKeystores(sn.config):
+  for keystore in listLoadableKeystores(sn.config, sn.keystoreCache):
     # Not relevant in signing node
     # TODO don't print when loading validators
     let feeRecipient = default(Eth1Address)
     case keystore.kind
     of KeystoreKind.Local:
-      discard sn.attachedValidators.addLocalValidator(keystore, feeRecipient)
+      discard sn.attachedValidators.addValidator(keystore,
+                                                 feeRecipient,
+                                                 defaultGasLimit)
       publicKeyIdents.add("\"0x" & keystore.pubkey.toHex() & "\"")
     of KeystoreKind.Remote:
       error "Signing node do not support remote validators",
@@ -113,11 +116,16 @@ proc initValidators(sn: var SigningNode): bool =
   true
 
 proc init(t: typedesc[SigningNode], config: SigningNodeConf): SigningNode =
-  var sn = SigningNode(config: config)
+  var sn = SigningNode(
+    config: config,
+    keystoreCache: KeystoreCacheRef.init()
+  )
 
   if not(initValidators(sn)):
     fatal "Could not find/initialize local validators"
     quit 1
+
+  asyncSpawn runKeystoreCachePruningLoop(sn.keystoreCache)
 
   let
     address = initTAddress(config.bindAddress, config.bindPort)
@@ -214,8 +222,7 @@ proc installApiHandlers*(node: SigningNode) =
         if validator_key.isErr():
           return errorResponse(Http400, InvalidValidatorPublicKey)
         let key = validator_key.get()
-        let validator = node.attachedValidators.getValidator(key)
-        if isNil(validator):
+        let validator = node.attachedValidators.getValidator(key).valueOr:
           return errorResponse(Http404, ValidatorNotFoundError)
         validator
 

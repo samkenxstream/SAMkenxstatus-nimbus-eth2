@@ -36,16 +36,17 @@ proc serveSyncCommitteeMessage*(service: SyncCommitteeServiceRef,
     vindex = duty.validator_index
     subcommitteeIdx = getSubcommitteeIndex(
       duty.validator_sync_committee_index)
-    validator = vc.getValidatorForDuties(duty.pubkey, slot).valueOr: return false
+    validator = vc.getValidatorForDuties(
+      duty.pubkey, slot, slashingSafe = true).valueOr: return false
     message =
       block:
         let res = await getSyncCommitteeMessage(validator, fork,
                                                 genesisValidatorsRoot,
                                                 slot, beaconBlockRoot)
         if res.isErr():
-          error "Unable to sign committee message using remote signer",
-                validator = shortLog(validator), slot = slot,
-                block_root = shortLog(beaconBlockRoot)
+          warn "Unable to sign committee message using remote signer",
+               validator = shortLog(validator), slot = slot,
+               block_root = shortLog(beaconBlockRoot)
           return
         res.get()
 
@@ -56,11 +57,12 @@ proc serveSyncCommitteeMessage*(service: SyncCommitteeServiceRef,
   let res =
     try:
       await vc.submitPoolSyncCommitteeSignature(message, ApiStrategyKind.First)
-    except ValidatorApiError:
-      error "Unable to publish sync committee message",
-            message = shortLog(message),
-            validator = shortLog(validator),
-            validator_index = vindex
+    except ValidatorApiError as exc:
+      warn "Unable to publish sync committee message",
+           message = shortLog(message),
+           validator = shortLog(validator),
+           validator_index = vindex,
+           reason = exc.getFailureReason()
       return false
     except CancelledError:
       debug "Publish sync committee message request was interrupted"
@@ -152,10 +154,10 @@ proc serveContributionAndProof*(service: SyncCommitteeServiceRef,
       let res = await validator.getContributionAndProofSignature(
         fork, genesisRoot, proof)
       if res.isErr():
-        error "Unable to sign sync committee contribution using remote signer",
-              validator = shortLog(validator),
-              contribution = shortLog(proof.contribution),
-              error_msg = res.error()
+        warn "Unable to sign sync committee contribution using remote signer",
+             validator = shortLog(validator),
+             contribution = shortLog(proof.contribution),
+             error_msg = res.error()
         return false
       res.get()
   debug "Sending sync contribution",
@@ -170,12 +172,13 @@ proc serveContributionAndProof*(service: SyncCommitteeServiceRef,
     try:
       await vc.publishContributionAndProofs(@[restSignedProof],
                                             ApiStrategyKind.First)
-    except ValidatorApiError as err:
-      error "Unable to publish sync contribution",
-            contribution = shortLog(proof.contribution),
-            validator = shortLog(validator),
-            validator_index = validatorIdx,
-            err_msg = err.msg
+    except ValidatorApiError as exc:
+      warn "Unable to publish sync contribution",
+           contribution = shortLog(proof.contribution),
+           validator = shortLog(validator),
+           validator_index = validatorIdx,
+           err_msg = exc.msg,
+           reason = exc.getFailureReason()
       false
     except CancelledError:
       debug "Publish sync contribution request was interrupted"
@@ -212,10 +215,9 @@ proc produceAndPublishContributions(service: SyncCommitteeServiceRef,
   var validators: seq[(AttachedValidator, SyncSubcommitteeIndex)]
 
   for duty in duties:
-    let validator = vc.attachedValidators[].getValidatorForDuties(
-        duty.pubkey, slot).valueOr:
-      continue
     let
+      validator = vc.getValidatorForDuties(duty.pubkey, slot).valueOr:
+        continue
       subCommitteeIdx =
         getSubcommitteeIndex(duty.validator_sync_committee_index)
       future = validator.getSyncCommitteeSelectionProof(
@@ -249,10 +251,10 @@ proc produceAndPublishContributions(service: SyncCommitteeServiceRef,
           sigRes = fut.read
           validator = validators[idx][0]
           subCommitteeIdx = validators[idx][1]
-        if sigRes.isErr:
-          error "Unable to create slot signature using remote signer",
-                validator = shortLog(validator),
-                error_msg = sigRes.error()
+        if sigRes.isErr():
+          warn "Unable to create slot signature using remote signer",
+               validator = shortLog(validator),
+               error_msg = sigRes.error()
         elif validator.index.isSome and
              is_sync_committee_aggregator(sigRes.get):
           res.add ContributionItem(
@@ -278,9 +280,10 @@ proc produceAndPublishContributions(service: SyncCommitteeServiceRef,
           let aggContribution =
             try:
               await contributionsFuts[item.subcommitteeIdx]
-            except ValidatorApiError:
-              error "Unable to get sync message contribution data", slot = slot,
-                    beaconBlockRoot = shortLog(beaconBlockRoot)
+            except ValidatorApiError as exc:
+              warn "Unable to get sync message contribution data", slot = slot,
+                   beaconBlockRoot = shortLog(beaconBlockRoot),
+                   reason = exc.getFailureReason()
               return
             except CancelledError:
               debug "Request for sync message contribution was interrupted"
@@ -348,9 +351,22 @@ proc publishSyncMessagesAndContributions(service: SyncCommitteeServiceRef,
     block:
       try:
         let res = await vc.getHeadBlockRoot(ApiStrategyKind.First)
-        res.root
+        if res.execution_optimistic.isNone():
+          ## The `execution_optimistic` is missing from the response, we assume
+          ## that the BN is unaware optimistic sync, so we consider the BN
+          ## to be synchronized with the network.
+          ## TODO (cheatfate): This should be removed when VC will be able to
+          ## handle getSpec() API call with fork constants.
+          res.data.root
+        else:
+          if res.execution_optimistic.get():
+            notice "Execution client not in sync; skipping validator duties " &
+                   "for now", slot = slot
+            return
+          res.data.root
       except ValidatorApiError as exc:
-        error "Unable to retrieve head block's root to sign", reason = exc.msg
+        warn "Unable to retrieve head block's root to sign", reason = exc.msg,
+             reason = exc.getFailureReason()
         return
       except CancelledError:
         debug "Block root request was interrupted"
@@ -364,9 +380,9 @@ proc publishSyncMessagesAndContributions(service: SyncCommitteeServiceRef,
     await service.produceAndPublishSyncCommitteeMessages(slot,
                                                          beaconBlockRoot,
                                                          duties)
-  except ValidatorApiError:
-    error "Unable to proceed sync committee messages", slot = slot,
-           duties_count = len(duties)
+  except ValidatorApiError as exc:
+    warn "Unable to proceed sync committee messages", slot = slot,
+         duties_count = len(duties), reason = exc.getFailureReason()
     return
   except CancelledError:
     debug "Sync committee producing process was interrupted"

@@ -1,14 +1,11 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   os, sequtils, strutils, options, json, terminal,
@@ -212,6 +209,13 @@ proc main() {.async.} =
       mnemonic = generateMnemonic(rng[])
       seed = getSeed(mnemonic, KeystorePass.init "")
       cfg = getRuntimeConfig(conf.eth2Network)
+      threshold = if conf.remoteSignersUrls.len > 0: conf.threshold
+                  else: 0
+
+    if conf.remoteValidatorsCount > 0 and
+       conf.remoteSignersUrls.len == 0:
+      fatal "Please specify at least one remote signer URL"
+      quit 1
 
     if (let res = secureCreatePath(string conf.outValidatorsDir); res.isErr):
       warn "Could not create validators folder",
@@ -229,7 +233,7 @@ proc main() {.async.} =
       string conf.outValidatorsDir,
       string conf.outSecretsDir,
       conf.remoteSignersUrls,
-      conf.threshold,
+      threshold,
       conf.remoteValidatorsCount,
       KeystoreMode.Fast)
 

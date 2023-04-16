@@ -5,10 +5,7 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   ./datatypes/base, ./forks, ./helpers
@@ -29,7 +26,7 @@ func compute_weak_subjectivity_period(
       SAFETY_DECAY * validator_count div (2 * 100 * cfg.MIN_PER_EPOCH_CHURN_LIMIT)
   return weak_subjectivity_period
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/weak-subjectivity.md#checking-for-stale-weak-subjectivity-checkpoint
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/weak-subjectivity.md#checking-for-stale-weak-subjectivity-checkpoint
 func is_within_weak_subjectivity_period*(cfg: RuntimeConfig, current_slot: Slot,
                                          ws_state: ForkedHashedBeaconState,
                                          ws_checkpoint: Checkpoint): bool =

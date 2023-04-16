@@ -5,17 +5,14 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   std/tables,
   stew/results,
   chronicles, chronos, metrics, taskpools,
   ../spec/[helpers, forks],
-  ../spec/datatypes/[altair, phase0, eip4844],
+  ../spec/datatypes/[altair, phase0, deneb],
   ../consensus_object_pools/[
     block_clearance, block_quarantine, blockchain_dag, exit_pool, attestation_pool,
     light_client_pool, sync_committee_msg_pool],
@@ -48,6 +45,10 @@ declareCounter beacon_attester_slashings_received,
   "Number of valid attester slashings processed by this node"
 declareCounter beacon_attester_slashings_dropped,
   "Number of invalid attester slashings dropped by this node", labels = ["reason"]
+declareCounter bls_to_execution_change_received,
+  "Number of valid BLS to execution changes processed by this node"
+declareCounter bls_to_execution_change_dropped,
+  "Number of invalid BLS to execution changes dropped by this node", labels = ["reason"]
 declareCounter beacon_proposer_slashings_received,
   "Number of valid proposer slashings processed by this node"
 declareCounter beacon_proposer_slashings_dropped,
@@ -64,6 +65,14 @@ declareCounter beacon_sync_committee_contributions_received,
   "Number of valid sync committee contributions processed by this node"
 declareCounter beacon_sync_committee_contributions_dropped,
   "Number of invalid sync committee contributions dropped by this node", labels = ["reason"]
+declareCounter beacon_light_client_finality_update_received,
+  "Number of valid light client finality update processed by this node"
+declareCounter beacon_light_client_finality_update_dropped,
+  "Number of invalid light client finality update dropped by this node", labels = ["reason"]
+declareCounter beacon_light_client_optimistic_update_received,
+  "Number of valid light client optimistic update processed by this node"
+declareCounter beacon_light_client_optimistic_update_dropped,
+  "Number of invalid light client optimistic update dropped by this node", labels = ["reason"]
 
 const delayBuckets = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, Inf]
 
@@ -83,11 +92,6 @@ type
     ## might reset multiple times per instance. This allows some safe level
     ## of gossip interleaving between nodes so long as they don't gossip at
     ## the same time.
-
-    nodeLaunchSlot*: Slot ##\
-    ## Set once, at node launch. This functions as a basic protection against
-    ## false positives from attestations persisting within the gossip network
-    ## across quick restarts.
 
   Eth2Processor* = object
     ## The Eth2Processor is the entry point for untrusted message processing -
@@ -124,7 +128,7 @@ type
 
     # Validated with no further verification required
     # ----------------------------------------------------------------
-    exitPool: ref ExitPool
+    validatorChangePool: ref ValidatorChangePool
 
     # Almost validated, pending cryptographic signature check
     # ----------------------------------------------------------------
@@ -151,7 +155,7 @@ proc new*(T: type Eth2Processor,
           validatorMonitor: ref ValidatorMonitor,
           dag: ChainDAGRef,
           attestationPool: ref AttestationPool,
-          exitPool: ref ExitPool,
+          validatorChangePool: ref ValidatorChangePool,
           validatorPool: ref ValidatorPool,
           syncCommitteeMsgPool: ref SyncCommitteeMsgPool,
           lightClientPool: ref LightClientPool,
@@ -163,13 +167,12 @@ proc new*(T: type Eth2Processor,
   (ref Eth2Processor)(
     doppelgangerDetectionEnabled: doppelgangerDetectionEnabled,
     doppelgangerDetection: DoppelgangerProtection(
-      nodeLaunchSlot: getBeaconTime().slotOrZero,
       broadcastStartEpoch: FAR_FUTURE_EPOCH),
     blockProcessor: blockProcessor,
     validatorMonitor: validatorMonitor,
     dag: dag,
     attestationPool: attestationPool,
-    exitPool: exitPool,
+    validatorChangePool: validatorChangePool,
     validatorPool: validatorPool,
     syncCommitteeMsgPool: syncCommitteeMsgPool,
     lightClientPool: lightClientPool,
@@ -180,7 +183,7 @@ proc new*(T: type Eth2Processor,
       # Only run eager attestation signature verification if we're not
       # processing blocks in order to give priority to block processing
       eager = proc(): bool = not blockProcessor[].hasBlocks(),
-      taskpool)
+      genesis_validators_root = dag.genesis_validators_root, taskpool)
   )
 
 # Each validator logs, validates then passes valid data to its destination
@@ -190,11 +193,11 @@ proc new*(T: type Eth2Processor,
 
 proc processSignedBeaconBlock*(
     self: var Eth2Processor, src: MsgSource,
-    signedBlockAndBlobs: ForkySignedBeaconBlockMaybeBlobs): ValidationRes =
+    signedBlock: ForkySignedBeaconBlock,
+    maybeFinalized: bool = false): ValidationRes =
   let
     wallTime = self.getCurrentBeaconTime()
     (afterGenesis, wallSlot) = wallTime.toSlot()
-    signedBlock = toSignedBeaconBlock(signedBlockAndBlobs)
 
   logScope:
     blockRoot = shortLog(signedBlock.root)
@@ -214,7 +217,7 @@ proc processSignedBeaconBlock*(
   debug "Block received", delay
 
   let v =
-    self.dag.validateBeaconBlock(self.quarantine, signedBlockAndBlobs, wallTime, {})
+    self.dag.validateBeaconBlock(self.quarantine, signedBlock, wallTime, {})
 
   if v.isOk():
     # Block passed validation - enqueue it for processing. The block processing
@@ -226,7 +229,8 @@ proc processSignedBeaconBlock*(
 
     self.blockProcessor[].addBlock(
       src, ForkedSignedBeaconBlock.init(signedBlock),
-      Opt.none(eip4844.BlobsSidecar),
+      BlobSidecars @[],
+      maybeFinalized = maybeFinalized,
       validationDur = nanoseconds(
         (self.getCurrentBeaconTime() - wallTime).nanoseconds))
 
@@ -258,8 +262,7 @@ proc setupDoppelgangerDetection*(self: var Eth2Processor, slot: Slot) =
   if self.doppelgangerDetectionEnabled:
     notice "Setting up doppelganger detection",
       epoch = slot.epoch,
-      broadcast_epoch = self.doppelgangerDetection.broadcastStartEpoch,
-      nodestart_epoch = self.doppelgangerDetection.nodeLaunchSlot.epoch()
+      broadcast_epoch = self.doppelgangerDetection.broadcastStartEpoch
 
 proc clearDoppelgangerProtection*(self: var Eth2Processor) =
   self.doppelgangerDetection.broadcastStartEpoch = FAR_FUTURE_EPOCH
@@ -273,25 +276,17 @@ proc checkForPotentialDoppelganger(
   if not self.doppelgangerDetectionEnabled:
     return
 
-  if attestation.data.slot <= self.doppelgangerDetection.nodeLaunchSlot + 1:
-    return
-
-  let broadcastStartEpoch = self.doppelgangerDetection.broadcastStartEpoch
-
   for validatorIndex in attesterIndices:
     let
-      validatorPubkey = self.dag.validatorKey(validatorIndex).get().toPubKey()
-      validator = self.validatorPool[].getValidator(validatorPubkey)
+      pubkey = self.dag.validatorKey(validatorIndex).get().toPubKey()
 
-    if not(isNil(validator)):
-      if validator.triggersDoppelganger(broadcastStartEpoch):
-        warn "Doppelganger attestation",
-          validator = shortLog(validator),
-          validator_index = validatorIndex,
-          activation_epoch = validator.activationEpoch,
-          broadcast_epoch = broadcastStartEpoch,
-          attestation = shortLog(attestation)
-        quitDoppelganger()
+    if self.validatorPool[].triggersDoppelganger(
+        pubkey, attestation.data.slot.epoch):
+      warn "Doppelganger attestation",
+        validator = shortLog(pubkey),
+        validator_index = validatorIndex,
+        attestation = shortLog(attestation)
+      quitDoppelganger()
 
 proc processAttestation*(
     self: ref Eth2Processor, src: MsgSource,
@@ -397,6 +392,30 @@ proc processSignedAggregateAndProof*(
 
     err(v.error())
 
+proc processBlsToExecutionChange*(
+    self: ref Eth2Processor, src: MsgSource,
+    blsToExecutionChange: SignedBLSToExecutionChange):
+    Future[ValidationRes] {.async.} =
+  logScope:
+    blsToExecutionChange = shortLog(blsToExecutionChange)
+
+  debug "BLS to execution change received"
+
+  let v = await self.validatorChangePool[].validateBlsToExecutionChange(
+    self.batchCrypto, blsToExecutionChange,
+    self.getCurrentBeaconTime().slotOrZero.epoch)
+
+  if v.isOk():
+    trace "BLS to execution change validated"
+    # Prioritize API-provided messages
+    self.validatorChangePool[].addMessage(
+      blsToExecutionChange, src == MsgSource.api)
+  else:
+    debug "Dropping BLS to execution change", validationError = v.error
+    beacon_attester_slashings_dropped.inc(1, [$v.error[0]])
+
+  return v
+
 proc processAttesterSlashing*(
     self: var Eth2Processor, src: MsgSource,
     attesterSlashing: AttesterSlashing): ValidationRes =
@@ -405,12 +424,12 @@ proc processAttesterSlashing*(
 
   debug "Attester slashing received"
 
-  let v = self.exitPool[].validateAttesterSlashing(attesterSlashing)
+  let v = self.validatorChangePool[].validateAttesterSlashing(attesterSlashing)
 
   if v.isOk():
     trace "Attester slashing validated"
 
-    self.exitPool[].addMessage(attesterSlashing)
+    self.validatorChangePool[].addMessage(attesterSlashing)
 
     self.validatorMonitor[].registerAttesterSlashing(src, attesterSlashing)
 
@@ -429,11 +448,11 @@ proc processProposerSlashing*(
 
   debug "Proposer slashing received"
 
-  let v = self.exitPool[].validateProposerSlashing(proposerSlashing)
+  let v = self.validatorChangePool[].validateProposerSlashing(proposerSlashing)
   if v.isOk():
     trace "Proposer slashing validated"
 
-    self.exitPool[].addMessage(proposerSlashing)
+    self.validatorChangePool[].addMessage(proposerSlashing)
 
     self.validatorMonitor[].registerProposerSlashing(src, proposerSlashing)
 
@@ -452,11 +471,11 @@ proc processSignedVoluntaryExit*(
 
   debug "Voluntary exit received"
 
-  let v = self.exitPool[].validateVoluntaryExit(signedVoluntaryExit)
+  let v = self.validatorChangePool[].validateVoluntaryExit(signedVoluntaryExit)
   if v.isOk():
     trace "Voluntary exit validated"
 
-    self.exitPool[].addMessage(signedVoluntaryExit)
+    self.validatorChangePool[].addMessage(signedVoluntaryExit)
 
     self.validatorMonitor[].registerVoluntaryExit(
       src, signedVoluntaryExit.message)
@@ -554,7 +573,7 @@ proc processSignedContributionAndProof*(
 
     err(v.error())
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-alpha.0/specs/altair/light-client/sync-protocol.md#process_light_client_finality_update
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.3/specs/altair/light-client/sync-protocol.md#process_light_client_finality_update
 proc processLightClientFinalityUpdate*(
     self: var Eth2Processor, src: MsgSource,
     finality_update: ForkedLightClientFinalityUpdate
@@ -563,9 +582,14 @@ proc processLightClientFinalityUpdate*(
     wallTime = self.getCurrentBeaconTime()
     v = validateLightClientFinalityUpdate(
       self.lightClientPool[], self.dag, finality_update, wallTime)
+
+  if v.isOk():
+    beacon_light_client_finality_update_received.inc()
+  else:
+    beacon_light_client_finality_update_dropped.inc(1, [$v.error[0]])
   v
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-alpha.0/specs/altair/light-client/sync-protocol.md#process_light_client_optimistic_update
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.3/specs/altair/light-client/sync-protocol.md#process_light_client_optimistic_update
 proc processLightClientOptimisticUpdate*(
     self: var Eth2Processor, src: MsgSource,
     optimistic_update: ForkedLightClientOptimisticUpdate
@@ -574,4 +598,8 @@ proc processLightClientOptimisticUpdate*(
     wallTime = self.getCurrentBeaconTime()
     v = validateLightClientOptimisticUpdate(
       self.lightClientPool[], self.dag, optimistic_update, wallTime)
+  if v.isOk():
+    beacon_light_client_optimistic_update_received.inc()
+  else:
+    beacon_light_client_optimistic_update_dropped.inc(1, [$v.error[0]])
   v

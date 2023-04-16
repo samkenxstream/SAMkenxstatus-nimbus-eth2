@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2022 Status Research & Development GmbH
+# Copyright (c) 2022-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -8,17 +8,15 @@
 {.used.}
 
 import
-  # Standard library
-  std/os,
   # Beacon chain internals
   ../../beacon_chain/spec/[beaconstate, validator, helpers, state_transition_epoch],
-  ../../beacon_chain/spec/datatypes/[altair, eip4844],
+  ../../beacon_chain/spec/datatypes/[altair, deneb],
   # Test utilities
   ../../testutil,
-  ../fixtures_utils
+  ../fixtures_utils, ../os_ops
 
 const
-  RewardsDirBase = SszTestsDir/const_preset/"eip4844"/"rewards"
+  RewardsDirBase = SszTestsDir/const_preset/"deneb"/"rewards"
   RewardsDirBasic = RewardsDirBase/"basic"/"pyspec_tests"
   RewardsDirLeak = RewardsDirBase/"leak"/"pyspec_tests"
   RewardsDirRandom = RewardsDirBase/"random"/"pyspec_tests"
@@ -33,12 +31,12 @@ proc runTest(rewardsDir, identifier: string) =
   let testDir = rewardsDir / identifier
 
   proc `testImpl _ rewards _ identifier`() =
-    test "EF - EIP4844 - Rewards - " & identifier & preset():
+    test "EF - Deneb - Rewards - " & identifier & preset():
       var info: altair.EpochInfo
 
       let
         state = newClone(
-          parseTest(testDir/"pre.ssz_snappy", SSZ, eip4844.BeaconState))
+          parseTest(testDir/"pre.ssz_snappy", SSZ, deneb.BeaconState))
         flagDeltas = [
           parseTest(testDir/"source_deltas.ssz_snappy", SSZ, Deltas),
           parseTest(testDir/"target_deltas.ssz_snappy", SSZ, Deltas),
@@ -79,7 +77,7 @@ proc runTest(rewardsDir, identifier: string) =
 
   `testImpl _ rewards _ identifier`()
 
-suite "EF - EIP4844 - Rewards " & preset():
+suite "EF - Deneb - Rewards " & preset():
   for rewardsDir in [RewardsDirBasic, RewardsDirLeak, RewardsDirRandom]:
     for kind, path in walkDir(rewardsDir, relative = true, checkDir = true):
       runTest(rewardsDir, path)

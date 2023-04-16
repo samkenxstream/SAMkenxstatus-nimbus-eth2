@@ -5,10 +5,7 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   chronicles,
@@ -286,11 +283,11 @@ proc installMessageValidators*(
 
   template validate[T: SomeForkyLightClientObject](
       msg: T,
-      contextFork: BeaconStateFork,
+      contextFork: ConsensusFork,
       validatorProcName: untyped): ValidationResult =
     msg.logReceived()
 
-    if contextFork != lightClient.cfg.stateForkAtEpoch(msg.contextEpoch):
+    if contextFork != lightClient.cfg.consensusForkAtEpoch(msg.contextEpoch):
       msg.logDropped(
         (ValidationResult.Reject, cstring "Invalid context fork"))
       return ValidationResult.Reject
@@ -346,16 +343,12 @@ proc installMessageValidators*(
     ValidationResult.Ignore
 
   let forkDigests = lightClient.forkDigests
-  for stateFork in BeaconStateFork:
-    if stateFork >= BeaconStateFork.EIP4844:
-      # Format is still in development, do not use Gossip at this time.
-      continue
-
-    withLcDataFork(lcDataForkAtStateFork(stateFork)):
+  for consensusFork in ConsensusFork:
+    withLcDataFork(lcDataForkAtConsensusFork(consensusFork)):
       when lcDataFork > LightClientDataFork.None:
         let
-          contextFork = stateFork  # Copy to avoid capturing `EIP4844` (Nim 1.6)
-          digest = forkDigests[].atStateFork(contextFork)
+          contextFork = consensusFork  # Avoid capturing `Deneb` (Nim 1.6)
+          digest = forkDigests[].atConsensusFork(contextFork)
 
         lightClient.network.addValidator(
           getLightClientFinalityUpdateTopic(digest),
@@ -387,7 +380,7 @@ proc updateGossipStatus*(
 
     currentEpochTargetGossipState = getTargetGossipState(
       epoch, cfg.ALTAIR_FORK_EPOCH, cfg.BELLATRIX_FORK_EPOCH,
-      cfg.CAPELLA_FORK_EPOCH, cfg.EIP4844_FORK_EPOCH, isBehind)
+      cfg.CAPELLA_FORK_EPOCH, cfg.DENEB_FORK_EPOCH, isBehind)
     targetGossipState =
       if lcBehind or epoch < 1:
         currentEpochTargetGossipState
@@ -397,7 +390,7 @@ proc updateGossipStatus*(
         # Therefore, LC topic subscriptions are kept for 1 extra epoch.
         let previousEpochTargetGossipState = getTargetGossipState(
           epoch - 1, cfg.ALTAIR_FORK_EPOCH, cfg.BELLATRIX_FORK_EPOCH,
-          cfg.CAPELLA_FORK_EPOCH, cfg.EIP4844_FORK_EPOCH, isBehind)
+          cfg.CAPELLA_FORK_EPOCH, cfg.DENEB_FORK_EPOCH, isBehind)
         currentEpochTargetGossipState + previousEpochTargetGossipState
 
   template currentGossipState(): auto = lightClient.gossipState
@@ -419,22 +412,16 @@ proc updateGossipStatus*(
     oldGossipForks = currentGossipState - targetGossipState
 
   for gossipFork in oldGossipForks:
-    if gossipFork >= BeaconStateFork.Altair:
-      if gossipFork >= BeaconStateFork.EIP4844:
-        # Format is still in development, do not use Gossip at this time.
-        continue
-      let forkDigest = lightClient.forkDigests[].atStateFork(gossipFork)
+    if gossipFork >= ConsensusFork.Altair:
+      let forkDigest = lightClient.forkDigests[].atConsensusFork(gossipFork)
       lightClient.network.unsubscribe(
         getLightClientFinalityUpdateTopic(forkDigest))
       lightClient.network.unsubscribe(
         getLightClientOptimisticUpdateTopic(forkDigest))
 
   for gossipFork in newGossipForks:
-    if gossipFork >= BeaconStateFork.Altair:
-      if gossipFork >= BeaconStateFork.EIP4844:
-        # Format is still in development, do not use Gossip at this time.
-        continue
-      let forkDigest = lightClient.forkDigests[].atStateFork(gossipFork)
+    if gossipFork >= ConsensusFork.Altair:
+      let forkDigest = lightClient.forkDigests[].atConsensusFork(gossipFork)
       lightClient.network.subscribe(
         getLightClientFinalityUpdateTopic(forkDigest),
         basicParams)

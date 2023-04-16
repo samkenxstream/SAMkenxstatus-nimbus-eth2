@@ -34,7 +34,6 @@ const
   HISTORICAL_DUTIES_EPOCHS* = 2'u64
   TIME_DELAY_FROM_SLOT* = 79.milliseconds
   SUBSCRIPTION_BUFFER_SLOTS* = 2'u64
-  VALIDATOR_DEFAULT_GAS_LIMIT* = 30_000_000'u64 # Stand-in, reasonable default
   EPOCHS_BETWEEN_VALIDATOR_REGISTRATION* = 1
 
   DelayBuckets* = [-Inf, -4.0, -2.0, -1.0, -0.5, -0.1, -0.05,
@@ -49,7 +48,8 @@ type
     proposers*: seq[ValidatorPubKey]
 
   RegistrationKind* {.pure.} = enum
-    Cached, IncorrectTime, MissingIndex, MissingFee, ErrorSignature, NoSignature
+    Cached, IncorrectTime, MissingIndex, MissingFee, MissingGasLimit
+      ErrorSignature, NoSignature
 
   PendingValidatorRegistration* = object
     registration*: SignedValidatorRegistrationV1
@@ -64,7 +64,7 @@ type
   DutiesServiceRef* = ref object of ClientServiceRef
 
   FallbackServiceRef* = ref object of ClientServiceRef
-    onlineEvent*: AsyncEvent
+    changesEvent*: AsyncEvent
 
   ForkServiceRef* = ref object of ClientServiceRef
 
@@ -127,7 +127,18 @@ type
     duties*: Table[Epoch, SyncCommitteeDuty]
 
   RestBeaconNodeStatus* {.pure.} = enum
-    Uninitalized, Offline, Incompatible, NotSynced, Online
+    Offline,      ## BN is offline.
+    Online,       ## BN is online, passed checkOnline() check.
+    Incompatible, ## BN configuration is NOT compatible with VC configuration.
+    Compatible,   ## BN configuration is compatible with VC configuration.
+    NotSynced,    ## BN is not in sync.
+    OptSynced,    ## BN is optimistically synced (EL is not in sync).
+    Synced,       ## BN and EL are synced.
+    Unexpected,   ## BN sends unexpected/incorrect response.
+    InternalError ## BN reports internal error.
+
+  BeaconNodesCounters* = object
+    data*: array[int(high(RestBeaconNodeStatus)) + 1, int]
 
   BeaconNodeServerRef* = ref BeaconNodeServer
 
@@ -154,10 +165,12 @@ type
     syncCommitteeService*: SyncCommitteeServiceRef
     doppelgangerService*: DoppelgangerServiceRef
     runSlotLoopFut*: Future[void]
+    runKeystoreCachePruningLoopFut*: Future[void]
     sigintHandleFut*: Future[void]
     sigtermHandleFut*: Future[void]
     keymanagerHost*: ref KeymanagerHost
     keymanagerServer*: RestServerRef
+    keystoreCache*: KeystoreCacheRef
     beaconClock*: BeaconClock
     attachedValidators*: ref ValidatorPool
     forks*: seq[Fork]
@@ -174,10 +187,18 @@ type
     validatorsRegCache*: Table[ValidatorPubKey, SignedValidatorRegistrationV1]
     rng*: ref HmacDrbgContext
 
+  ApiFailure* {.pure.} = enum
+    Communication, Invalid, NotFound, NotSynced, Internal, Unexpected
+
+  ApiNodeFailure* = object
+    node*: BeaconNodeServerRef
+    failure*: ApiFailure
+
   ValidatorClientRef* = ref ValidatorClient
 
   ValidatorClientError* = object of CatchableError
   ValidatorApiError* = object of ValidatorClientError
+    data*: seq[ApiNodeFailure]
 
 const
   DefaultDutyAndProof* = DutyAndProof(epoch: Epoch(0xFFFF_FFFF_FFFF_FFFF'u64))
@@ -222,6 +243,55 @@ proc `$`*(roles: set[BeaconNodeRole]): string =
       "{all}"
   else:
     "{}"
+
+proc `$`*(status: RestBeaconNodeStatus): string =
+  case status
+  of RestBeaconNodeStatus.Offline: "offline"
+  of RestBeaconNodeStatus.Online: "online"
+  of RestBeaconNodeStatus.Incompatible: "incompatible"
+  of RestBeaconNodeStatus.Compatible: "compatible"
+  of RestBeaconNodeStatus.NotSynced: "bn-unsynced"
+  of RestBeaconNodeStatus.OptSynced: "el-unsynced"
+  of RestBeaconNodeStatus.Synced: "synced"
+  of RestBeaconNodeStatus.Unexpected: "unexpected data"
+  of RestBeaconNodeStatus.InternalError: "internal error"
+
+proc `$`*(failure: ApiFailure): string =
+  case failure
+  of ApiFailure.Communication: "Connection with beacon node has been lost"
+  of ApiFailure.Invalid: "Invalid response received from beacon node"
+  of ApiFailure.NotFound: "Beacon node did not found requested entity"
+  of ApiFailure.NotSynced: "Beacon node not in sync with network"
+  of ApiFailure.Internal: "Beacon node reports internal failure"
+  of ApiFailure.Unexpected: "Beacon node reports unexpected status"
+
+proc getNodeCounts*(vc: ValidatorClientRef): BeaconNodesCounters =
+  var res = BeaconNodesCounters()
+  for node in vc.beaconNodes: inc(res.data[int(node.status)])
+  res
+
+proc getFailureReason*(exc: ref ValidatorApiError): string =
+  var counts: array[int(high(ApiFailure)) + 1, int]
+  let
+    errors = exc[].data
+    errorsCount = len(errors)
+
+  if errorsCount > 1:
+    var maxFailure =
+      block:
+        var maxCount = -1
+        var res = ApiFailure.Unexpected
+        for item in errors:
+          inc(counts[int(item.failure)])
+          if counts[int(item.failure)] > maxCount:
+            maxCount = counts[int(item.failure)]
+            res = item.failure
+        res
+    $maxFailure
+  elif errorsCount == 1:
+    $errors[0].failure
+  else:
+    exc.msg
 
 proc shortLog*(roles: set[BeaconNodeRole]): string =
   var r = "AGBSD"
@@ -277,6 +347,87 @@ chronicles.expandIt(SyncCommitteeDuty):
   pubkey = shortLog(it.pubkey)
   validator_index = it.validator_index
   validator_sync_committee_index = it.validator_sync_committee_index
+
+proc checkConfig*(info: RestSpecVC): bool =
+  # /!\ Keep in sync with `spec/eth2_apis/rest_types.nim` > `RestSpecVC`.
+  info.MAX_VALIDATORS_PER_COMMITTEE == MAX_VALIDATORS_PER_COMMITTEE and
+  info.SLOTS_PER_EPOCH == SLOTS_PER_EPOCH and
+  info.SECONDS_PER_SLOT == SECONDS_PER_SLOT and
+  info.EPOCHS_PER_ETH1_VOTING_PERIOD == EPOCHS_PER_ETH1_VOTING_PERIOD and
+  info.SLOTS_PER_HISTORICAL_ROOT == SLOTS_PER_HISTORICAL_ROOT and
+  info.EPOCHS_PER_HISTORICAL_VECTOR == EPOCHS_PER_HISTORICAL_VECTOR and
+  info.EPOCHS_PER_SLASHINGS_VECTOR == EPOCHS_PER_SLASHINGS_VECTOR and
+  info.HISTORICAL_ROOTS_LIMIT == HISTORICAL_ROOTS_LIMIT and
+  info.VALIDATOR_REGISTRY_LIMIT == VALIDATOR_REGISTRY_LIMIT and
+  info.MAX_PROPOSER_SLASHINGS == MAX_PROPOSER_SLASHINGS and
+  info.MAX_ATTESTER_SLASHINGS == MAX_ATTESTER_SLASHINGS and
+  info.MAX_ATTESTATIONS == MAX_ATTESTATIONS and
+  info.MAX_DEPOSITS == MAX_DEPOSITS and
+  info.MAX_VOLUNTARY_EXITS == MAX_VOLUNTARY_EXITS and
+  info.DOMAIN_BEACON_PROPOSER == DOMAIN_BEACON_PROPOSER and
+  info.DOMAIN_BEACON_ATTESTER == DOMAIN_BEACON_ATTESTER and
+  info.DOMAIN_RANDAO == DOMAIN_RANDAO and
+  info.DOMAIN_DEPOSIT == DOMAIN_DEPOSIT and
+  info.DOMAIN_VOLUNTARY_EXIT == DOMAIN_VOLUNTARY_EXIT and
+  info.DOMAIN_SELECTION_PROOF == DOMAIN_SELECTION_PROOF and
+  info.DOMAIN_AGGREGATE_AND_PROOF == DOMAIN_AGGREGATE_AND_PROOF
+
+proc updateStatus*(node: BeaconNodeServerRef, status: RestBeaconNodeStatus) =
+  logScope:
+    endpoint = node
+  case status
+  of RestBeaconNodeStatus.Offline:
+    if node.status != status:
+      warn "Beacon node down"
+      node.status = status
+  of RestBeaconNodeStatus.Online:
+    if node.status != status:
+      let version = if node.ident.isSome(): node.ident.get() else: "<missing>"
+      notice "Beacon node is online", agent_version = version
+      node.status = status
+  of RestBeaconNodeStatus.Incompatible:
+    if node.status != status:
+      warn "Beacon node has incompatible configuration"
+      node.status = status
+  of RestBeaconNodeStatus.Compatible:
+    if node.status != status:
+      notice "Beacon node is compatible"
+      node.status = status
+  of RestBeaconNodeStatus.NotSynced:
+    if node.status notin {RestBeaconNodeStatus.NotSynced,
+                          RestBeaconNodeStatus.OptSynced}:
+      doAssert(node.syncInfo.isSome())
+      let si = node.syncInfo.get()
+      warn "Beacon node not in sync",
+           last_head_slot = si.head_slot,
+           last_sync_distance = si.sync_distance,
+           last_optimistic = si.is_optimistic.get(false)
+      node.status = status
+  of RestBeaconNodeStatus.OptSynced:
+    if node.status != status:
+      doAssert(node.syncInfo.isSome())
+      let si = node.syncInfo.get()
+      notice "Execution client not in sync (beacon node optimistically synced)",
+             last_head_slot = si.head_slot,
+             last_sync_distance = si.sync_distance,
+             last_optimistic = si.is_optimistic.get(false)
+      node.status = status
+  of RestBeaconNodeStatus.Synced:
+    if node.status != status:
+      doAssert(node.syncInfo.isSome())
+      let si = node.syncInfo.get()
+      notice "Beacon node is in sync",
+             head_slot = si.head_slot, sync_distance = si.sync_distance,
+             is_optimistic = si.is_optimistic.get(false)
+      node.status = status
+  of RestBeaconNodeStatus.Unexpected:
+    if node.status != status:
+      error "Beacon node provides unexpected response"
+      node.status = status
+  of RestBeaconNodeStatus.InternalError:
+    if node.status != status:
+      warn "Beacon node reports internal error"
+      node.status = status
 
 proc stop*(csr: ClientServiceRef) {.async.} =
   debug "Stopping service", service = csr.name
@@ -360,7 +511,8 @@ proc init*(t: typedesc[BeaconNodeServerRef], remote: Uri,
   let server = BeaconNodeServerRef(
     client: client, endpoint: $remote, index: index, roles: roles,
     logIdent: client.address.hostname & ":" &
-              Base10.toString(client.address.port)
+              Base10.toString(client.address.port),
+    status: RestBeaconNodeStatus.Offline
   )
   ok(server)
 
@@ -482,8 +634,9 @@ proc getDelay*(vc: ValidatorClientRef, deadline: BeaconTime): TimeDiff =
   vc.beaconClock.now() - deadline
 
 proc getValidatorForDuties*(vc: ValidatorClientRef,
-                            key: ValidatorPubKey, slot: Slot): Opt[AttachedValidator] =
-  vc.attachedValidators[].getValidatorForDuties(key, slot)
+                            key: ValidatorPubKey, slot: Slot,
+                            slashingSafe = false): Opt[AttachedValidator] =
+  vc.attachedValidators[].getValidatorForDuties(key, slot, slashingSafe)
 
 proc forkAtEpoch*(vc: ValidatorClientRef, epoch: Epoch): Fork =
   # If schedule is present, it MUST not be empty.
@@ -508,56 +661,31 @@ proc addValidator*(vc: ValidatorClientRef, keystore: KeystoreData) =
     feeRecipient = vc.config.validatorsDir.getSuggestedFeeRecipient(
       keystore.pubkey, vc.config.defaultFeeRecipient).valueOr(
         vc.config.defaultFeeRecipient)
-  case keystore.kind
-  of KeystoreKind.Local:
-    discard vc.attachedValidators[].addLocalValidator(keystore, feeRecipient)
-  of KeystoreKind.Remote:
-    let
-      httpFlags =
-        block:
-          var res: set[HttpClientFlag]
-          if RemoteKeystoreFlag.IgnoreSSLVerification in keystore.flags:
-            res.incl({HttpClientFlag.NoVerifyHost,
-                      HttpClientFlag.NoVerifyServerName})
-          res
-      prestoFlags = {RestClientFlag.CommaSeparatedArray}
-      clients =
-        block:
-          var res: seq[(RestClientRef, RemoteSignerInfo)]
-          for remote in keystore.remotes:
-            let client = RestClientRef.new($remote.url, prestoFlags,
-                                           httpFlags)
-            if client.isErr():
-              warn "Unable to resolve distributed signer address",
-                   remote_url = $remote.url, validator = $remote.pubkey
-            else:
-              res.add((client.get(), remote))
-          res
-    if len(clients) > 0:
-      discard vc.attachedValidators[].addRemoteValidator(keystore, clients,
-                                                         feeRecipient)
-    else:
-      warn "Unable to initialize remote validator",
-           validator = $keystore.pubkey
+    gasLimit = vc.config.validatorsDir.getSuggestedGasLimit(
+      keystore.pubkey, vc.config.suggestedGasLimit).valueOr(
+        vc.config.suggestedGasLimit)
+
+  discard vc.attachedValidators[].addValidator(keystore, feeRecipient, gasLimit)
 
 proc removeValidator*(vc: ValidatorClientRef,
                       pubkey: ValidatorPubKey) {.async.} =
-  let validator = vc.attachedValidators[].getValidator(pubkey)
-  if not(isNil(validator)):
-    case validator.kind
-    of ValidatorKind.Local:
-      discard
-    of ValidatorKind.Remote:
-      # We must close all the REST clients running for the remote validator.
-      let pending =
-        block:
-          var res: seq[Future[void]]
-          for item in validator.clients:
-            res.add(item[0].closeWait())
-          res
-      await allFutures(pending)
-    # Remove validator from ValidatorPool.
-    vc.attachedValidators[].removeValidator(pubkey)
+  let validator = vc.attachedValidators[].getValidator(pubkey).valueOr:
+    return
+  # Remove validator from ValidatorPool.
+  vc.attachedValidators[].removeValidator(pubkey)
+
+  case validator.kind
+  of ValidatorKind.Local:
+    discard
+  of ValidatorKind.Remote:
+    # We must close all the REST clients running for the remote validator.
+    let pending =
+      block:
+        var res: seq[Future[void]]
+        for item in validator.clients:
+          res.add(item[0].closeWait())
+        res
+    await allFutures(pending)
 
 proc getFeeRecipient*(vc: ValidatorClientRef, pubkey: ValidatorPubKey,
                       validatorIdx: ValidatorIndex,
@@ -573,6 +701,12 @@ proc getFeeRecipient*(vc: ValidatorClientRef, pubkey: ValidatorPubKey,
       Opt.some(staticRecipient.get())
     else:
       Opt.none(Eth1Address)
+
+proc getGasLimit*(vc: ValidatorClientRef,
+                  pubkey: ValidatorPubKey): uint64 =
+  getSuggestedGasLimit(
+    vc.config.validatorsDir, pubkey, vc.config.suggestedGasLimit).valueOr:
+      vc.config.suggestedGasLimit
 
 proc prepareProposersList*(vc: ValidatorClientRef,
                            epoch: Epoch): seq[PrepareBeaconProposer] =
@@ -614,7 +748,7 @@ proc isExpired*(vc: ValidatorClientRef,
     else:
       true
 
-proc getValidatorRegistraion(
+proc getValidatorRegistration(
        vc: ValidatorClientRef,
        validator: AttachedValidator,
        timestamp: Time,
@@ -642,13 +776,13 @@ proc getValidatorRegistraion(
       debug "Could not get fee recipient for registration data",
             validator = shortLog(validator)
       return err(RegistrationKind.MissingFee)
-
+    let gasLimit = vc.getGasLimit(validator.pubkey)
     var registration =
       SignedValidatorRegistrationV1(
         message: ValidatorRegistrationV1(
           fee_recipient:
             ExecutionAddress(data: distinctBase(feeRecipient.get())),
-          gas_limit: VALIDATOR_DEFAULT_GAS_LIMIT,
+          gas_limit: gasLimit,
           timestamp: uint64(timestamp.toUnix()),
           pubkey: validator.pubkey
         )
@@ -696,11 +830,12 @@ proc prepareRegistrationList*(
     errors = 0
     indexMissing = 0
     feeMissing = 0
+    gasLimit = 0
     cached = 0
     timed = 0
 
   for validator in vc.attachedValidators[].items():
-    let res = vc.getValidatorRegistraion(validator, timestamp, fork)
+    let res = vc.getValidatorRegistration(validator, timestamp, fork)
     if res.isOk():
       let preg = res.get()
       if preg.future.isNil():
@@ -716,6 +851,7 @@ proc prepareRegistrationList*(
       of RegistrationKind.ErrorSignature: inc(errors)
       of RegistrationKind.MissingIndex: inc(indexMissing)
       of RegistrationKind.MissingFee: inc(feeMissing)
+      of RegistrationKind.MissingGasLimit: inc(gasLimit)
 
   succeed = len(registrations)
 
@@ -743,3 +879,7 @@ proc prepareRegistrationList*(
         incorrect_time = timed
 
   return registrations
+
+proc init*(t: typedesc[ApiNodeFailure], node: BeaconNodeServerRef,
+           failure: ApiFailure): ApiNodeFailure =
+  ApiNodeFailure(node: node, failure: failure)

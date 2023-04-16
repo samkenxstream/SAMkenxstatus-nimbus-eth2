@@ -67,7 +67,8 @@ TOOLS_CORE := \
 	nimbus_light_client \
 	nimbus_validator_client \
 	nimbus_signing_node \
-	validator_db_aggregator
+	validator_db_aggregator \
+	ncli_testnet
 
 # This TOOLS/TOOLS_CORE decomposition is a workaroud so nimbus_beacon_node can
 # build on its own, and if/when that becomes a non-issue, it can be recombined
@@ -143,7 +144,7 @@ DEPOSITS_DELAY := 0
 #- "--define:release" cannot be added to "config.nims"
 #- disable Nim's default parallelisation because it starts too many processes for too little gain
 #- https://github.com/status-im/nim-libp2p#use-identify-metrics
-NIM_PARAMS += -d:release --parallelBuild:1 -d:libp2p_agents_metrics -d:KnownLibP2PAgents=nimbus,lighthouse,lodestar,prysm,teku
+NIM_PARAMS := -d:release --parallelBuild:1 -d:libp2p_agents_metrics -d:KnownLibP2PAgents=nimbus,lighthouse,lodestar,prysm,teku $(NIM_PARAMS)
 
 ifeq ($(USE_LIBBACKTRACE), 0)
 NIM_PARAMS += -d:disable_libbacktrace
@@ -184,11 +185,12 @@ libbacktrace:
 # - --base-metrics-port + [0, --nodes)
 # - --base-vc-keymanager-port + [0, --nodes)
 # - --base-vc-metrics-port + [0, --nodes]
-# - --base-remote-signer-port + [0, --remote-signers)
+# - --base-remote-signer-port + [0, --nimbus-signer-nodes | --web3signer-nodes)
+# - --base-remote-signer-metrics-port + [0, --nimbus-signer-node | --web3signer-nodes)
 #
 # Local testnets with --run-geth or --run-nimbus (only these ports):
 # - --base-el-net-port + --el-port-offset * [0, --nodes + --light-clients)
-# - --base-el-http-port + --el-port-offset * [0, --nodes + --light-clients)
+# - --base-el-rpc-port + --el-port-offset * [0, --nodes + --light-clients)
 # - --base-el-ws-port + --el-port-offset * [0, --nodes + --light-clients)
 # - --base-el-auth-rpc-port + --el-port-offset * [0, --nodes + --light-clients)
 UNIT_TEST_BASE_PORT := 9950
@@ -202,19 +204,16 @@ restapi-test:
 		--resttest-delay 30 \
 		--kill-old-processes
 
-ifneq ($(shell uname -p), arm)
-TESTNET_EXTRA_FLAGS := --run-geth --dl-geth
-else
-TESTNET_EXTRA_FLAGS :=
-endif
-
 local-testnet-minimal:
 	./scripts/launch_local_testnet.sh \
 		--data-dir $@ \
 		--preset minimal \
-		--nodes 4 \
+		--nodes 2 \
+		--capella-fork-epoch 3 \
+		--deneb-fork-epoch 20 \
 		--stop-at-epoch 6 \
 		--disable-htop \
+		--enable-payload-builder \
 		--enable-logtrace \
 		--base-port $$(( 6001 + EXECUTOR_NUMBER * 500 )) \
 		--base-rest-port $$(( 6031 + EXECUTOR_NUMBER * 500 )) \
@@ -222,14 +221,15 @@ local-testnet-minimal:
 		--base-vc-keymanager-port $$(( 6131 + EXECUTOR_NUMBER * 500 )) \
 		--base-vc-metrics-port $$(( 6161 + EXECUTOR_NUMBER * 500 )) \
 		--base-remote-signer-port $$(( 6201 + EXECUTOR_NUMBER * 500 )) \
+		--base-remote-signer-metrics-port $$(( 6251 + EXECUTOR_NUMBER * 500 )) \
 		--base-el-net-port $$(( 6301 + EXECUTOR_NUMBER * 500 )) \
-		--base-el-http-port $$(( 6302 + EXECUTOR_NUMBER * 500 )) \
+		--base-el-rpc-port $$(( 6302 + EXECUTOR_NUMBER * 500 )) \
 		--base-el-ws-port $$(( 6303 + EXECUTOR_NUMBER * 500 )) \
 		--base-el-auth-rpc-port $$(( 6304 + EXECUTOR_NUMBER * 500 )) \
 		--el-port-offset 5 \
 		--timeout 648 \
 		--kill-old-processes \
-		$(TESTNET_EXTRA_FLAGS) \
+		--run-geth --dl-geth \
 		-- \
 		--verify-finalization \
 		--discv5:no
@@ -237,7 +237,7 @@ local-testnet-minimal:
 local-testnet-mainnet:
 	./scripts/launch_local_testnet.sh \
 		--data-dir $@ \
-		--nodes 4 \
+		--nodes 2 \
 		--stop-at-epoch 6 \
 		--disable-htop \
 		--enable-logtrace \
@@ -247,22 +247,23 @@ local-testnet-mainnet:
 		--base-vc-keymanager-port $$(( 7131 + EXECUTOR_NUMBER * 500 )) \
 		--base-vc-metrics-port $$(( 7161 + EXECUTOR_NUMBER * 500 )) \
 		--base-remote-signer-port $$(( 7201 + EXECUTOR_NUMBER * 500 )) \
+		--base-remote-signer-metrics-port $$(( 7251 + EXECUTOR_NUMBER * 500 )) \
 		--base-el-net-port $$(( 7301 + EXECUTOR_NUMBER * 500 )) \
-		--base-el-http-port $$(( 7302 + EXECUTOR_NUMBER * 500 )) \
+		--base-el-rpc-port $$(( 7302 + EXECUTOR_NUMBER * 500 )) \
 		--base-el-ws-port $$(( 7303 + EXECUTOR_NUMBER * 500 )) \
 		--base-el-auth-rpc-port $$(( 7304 + EXECUTOR_NUMBER * 500 )) \
 		--el-port-offset 5 \
 		--timeout 2784 \
 		--kill-old-processes \
-		$(TESTNET_EXTRA_FLAGS) \
+		--run-geth --dl-geth \
 		-- \
 		--verify-finalization \
 		--discv5:no
 
 # test binaries that can output an XML report
 XML_TEST_BINARIES_CORE := \
-	consensus_spec_tests_mainnet \
-	consensus_spec_tests_minimal
+	consensus_spec_tests_minimal \
+	consensus_spec_tests_mainnet
 
 XML_TEST_BINARIES := \
 	$(XML_TEST_BINARIES_CORE) \
@@ -433,21 +434,21 @@ $(TOOLS): | build deps
 # therefore even more wasted time, when it does.
 #
 # If one asks for, e.g., `make nimbus_beacon_node nimbus_validator_client`, it
-# intentionally allows those in parallel, because the CI system does do that.
-#
-# Also, it's not 100% correct in some sense, because it excludes the libnfuzz
-# and Gnosis targets, but that's fine for the use case: a two-core CI machine
-# where by the time either comes up, that crucial high-RAM period should have
-# passed already for `nimbus_beacon_node`, and which only builds Gnosis using
-# non-Windows platforms by default.
+# intentionally allows those in parallel, as the CI systems don't do that.
 #
 # https://www.gnu.org/software/make/manual/html_node/Parallel-Disable.html
 # describes a special target .WAIT which would enable this more easily but
 # remains unusable for this Makefile due to requiring GNU Make 4.4.
 ifneq (,$(filter all,$(MAKECMDGOALS)))
 FORCE_BUILD_ALONE_TOOLS_DEPS := $(TOOLS_CORE)
+
+# If this isn't an included target (such as Windows), this is a no-op)
+gnosis-build: | nimbus_beacon_node
 else ifeq (,$(MAKECMDGOALS))
 FORCE_BUILD_ALONE_TOOLS_DEPS := $(TOOLS_CORE)
+
+# If this isn't an included target (such as Windows), this is a no-op)
+gnosis-build: | nimbus_beacon_node
 else
 FORCE_BUILD_ALONE_TOOLS_DEPS :=
 endif
@@ -672,13 +673,13 @@ sepolia-dev-deposit: | sepolia-build deposit_contract
 clean-sepolia:
 	$(call CLEAN_NETWORK,sepolia)
 
-### Capella devnets
+### Withdrawals testnets
 
-capella-devnet-3:
-	tmuxinator start -p scripts/tmuxinator-el-cl-pair-in-devnet.yml network="vendor/capella-testnets/withdrawal-devnet-3/custom_config_data"
+zhejiang:
+	tmuxinator start -p scripts/tmuxinator-el-cl-pair-in-devnet.yml network="vendor/withdrawals-testnets/zhejiang-testnet/custom_config_data"
 
-clean-capella-devnet-3:
-	scripts/clean-devnet-dir.sh vendor/capella-testnets/withdrawal-devnet-3/custom_config_data
+clean-zhejiang:
+	scripts/clean-devnet-dir.sh vendor/withdrawals-testnets/zhejiang-testnet/custom_config_data
 
 ###
 ### Gnosis chain binary

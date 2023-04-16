@@ -5,10 +5,7 @@
 #   * Apache v2 license (license terms in the root directory or at http://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import
   # Status
@@ -25,8 +22,7 @@ import
   ./batch_validation
 
 from ../spec/datatypes/capella import SignedBeaconBlock
-from ../spec/datatypes/eip4844 import
-  SignedBeaconBlock, SignedBeaconBlockAndBlobsSidecar, BLS_MODULUS
+from ../spec/datatypes/deneb import SignedBeaconBlock, BLS_MODULUS
 
 from libp2p/protocols/pubsub/pubsub import ValidationResult
 
@@ -96,7 +92,7 @@ func check_propagation_slot_range(
   let
     pastSlot = (wallTime - MAXIMUM_GOSSIP_CLOCK_DISPARITY).toSlot()
 
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#configuration
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#configuration
   # The spec value of ATTESTATION_PROPAGATION_SLOT_RANGE is 32, but it can
   # retransmit attestations on the cusp of being out of spec, and which by
   # the time they reach their destination might be out of spec.
@@ -182,10 +178,10 @@ template validateBeaconBlockBellatrix(
     parent: BlockRef): untyped =
   discard
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/bellatrix/p2p-interface.md#beacon_block
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/bellatrix/p2p-interface.md#beacon_block
 template validateBeaconBlockBellatrix(
        signed_beacon_block: bellatrix.SignedBeaconBlock |
-       capella.SignedBeaconBlock | eip4844.SignedBeaconBlock,
+       capella.SignedBeaconBlock | deneb.SignedBeaconBlock,
        parent: BlockRef): untyped =
   # If the execution is enabled for the block -- i.e.
   # is_execution_enabled(state, block.body) then validate the following:
@@ -223,72 +219,16 @@ template validateBeaconBlockBellatrix(
   # cannot occur here, because Nimbus's optimistic sync waits for either
   # `ACCEPTED` or `SYNCING` from the EL to get this far.
 
-template validateBlobsSidecar(
-    signed_beacon_block: phase0.SignedBeaconBlock | altair.SignedBeaconBlock |
-    bellatrix.SignedBeaconBlock | capella.SignedBeaconBlock): untyped =
-  discard
-
-template validateBlobsSidecar(
-    signed_beacon_block: eip4844.SignedBeaconBlockAndBlobsSidecar):
-    untyped =
-  # TODO
-  # [REJECT] The KZG commitments of the blobs are all correctly encoded
-  # compressed BLS G1 points -- i.e. all(bls.KeyValidate(commitment) for
-  # commitment in block.body.blob_kzg_commitments)
-
-  # [REJECT] The KZG commitments correspond to the versioned hashes in
-  # the transactions list --
-  # i.e. verify_kzg_commitments_against_transactions(block.body.execution_payload.transactions,
-  # block.body.blob_kzg_commitments)
-  if not verify_kzg_commitments_against_transactions(
-    signed_beacon_block.beacon_block.message.body.execution_payload.transactions.asSeq,
-    signed_beacon_block.beacon_block.message.body.blob_kzg_commitments.asSeq):
-    return errReject("KZG blob commitments not correctly encoded")
-
-  let sidecar = signed_beacon_block.blobs_sidecar
-
-  # [IGNORE] the sidecar.beacon_block_slot is for the current slot
-  # (with a MAXIMUM_GOSSIP_CLOCK_DISPARITY allowance) -- i.e.
-  # sidecar.beacon_block_slot == block.slot.
-  if not (sidecar.beacon_block_slot == signed_beacon_block.beacon_block.message.slot):
-     return errIgnore("sidecar and block slots not equal")
-
-  # [REJECT] the sidecar.blobs are all well formatted, i.e. the
-  # BLSFieldElement in valid range (x < BLS_MODULUS).
-  for blob in sidecar.blobs:
-    for i in 0..<blob.len div 8:
-      let fe = UInt256.fromBytesBE(blob[i*8..(i+1)*8])
-      if fe >= BLS_MODULUS:
-        return errIgnore("BLSFieldElement outside of valid range")
-
-  # TODO
-  # [REJECT] The KZG proof is a correctly encoded compressed BLS G1
-  # point -- i.e. bls.KeyValidate(blobs_sidecar.kzg_aggregated_proof)
-
-  # [REJECT] The KZG commitments in the block are valid against the
-  # provided blobs sidecar -- i.e. validate_blobs_sidecar(block.slot,
-  # hash_tree_root(block), block.body.blob_kzg_commitments, sidecar)
-
-  let res = validate_blobs_sidecar(signed_beacon_block.beacon_block.message.slot,
-                                   hash_tree_root(signed_beacon_block.beacon_block),
-                                   signed_beacon_block.beacon_block.message
-                                   .body.blob_kzg_commitments.asSeq,
-                                   sidecar)
-  if res.isErr():
-    return errIgnore(res.error())
-
 
 # https://github.com/ethereum/consensus-specs/blob/v1.1.9/specs/phase0/p2p-interface.md#beacon_block
 # https://github.com/ethereum/consensus-specs/blob/v1.3.0-alpha.0/specs/bellatrix/p2p-interface.md#beacon_block
 proc validateBeaconBlock*(
     dag: ChainDAGRef, quarantine: ref Quarantine,
-    signed_beacon_block_and_blobs: ForkySignedBeaconBlockMaybeBlobs,
+    signed_beacon_block: ForkySignedBeaconBlock,
     wallTime: BeaconTime, flags: UpdateFlags): Result[void, ValidationError] =
   # In general, checks are ordered from cheap to expensive. Especially, crypto
   # verification could be quite a bit more expensive than the rest. This is an
   # externally easy-to-invoke function by tossing network packets at the node.
-
-  let signed_beacon_block = toSignedBeaconBlock(signed_beacon_block_and_blobs)
 
   # [IGNORE] The block is not from a future slot (with a
   # MAXIMUM_GOSSIP_CLOCK_DISPARITY allowance) -- i.e. validate that
@@ -308,7 +248,7 @@ proc validateBeaconBlock*(
   # proposer for the slot, signed_beacon_block.message.slot.
   #
   # While this condition is similar to the proposer slashing condition at
-  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/validator.md#proposer-slashing
+  # https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/validator.md#proposer-slashing
   # it's not identical, and this check does not address slashing:
   #
   # (1) The beacon blocks must be conflicting, i.e. different, for the same
@@ -377,16 +317,11 @@ proc validateBeaconBlock*(
         # validation.
         return errReject("BeaconBlock: rejected, parent from unviable fork")
 
-    let blobs =
-      when signed_beacon_block is eip4844.SignedBeaconBlockAndBlobsSidecar:
-        Opt.some(signed_beacon_block.blobs_sidecar)
-      else:
-        Opt.none(eip4844.BlobsSidecar)
     # When the parent is missing, we can't validate the block - we'll queue it
     # in the quarantine for later processing
     if not quarantine[].addOrphan(
         dag.finalizedHead.slot,
-        ForkedSignedBeaconBlock.init(signed_beacon_block), blobs):
+        ForkedSignedBeaconBlock.init(signed_beacon_block)):
       debug "Block quarantine full"
 
     return errIgnore("BeaconBlock: Parent not found")
@@ -445,10 +380,7 @@ proc validateBeaconBlock*(
       dag.validatorKey(proposer).get(),
       signed_beacon_block.signature):
     quarantine[].addUnviable(signed_beacon_block.root)
-
     return errReject("BeaconBlock: Invalid proposer signature")
-
-  validateBlobsSidecar(signed_beacon_block_and_blobs)
 
   ok()
 
@@ -556,8 +488,6 @@ proc validateAttestation*(
 
   let
     fork = pool.dag.forkAtEpoch(attestation.data.slot.epoch)
-    genesis_validators_root =
-      getStateField(pool.dag.headState, genesis_validators_root)
     attesting_index = get_attesting_indices_one(
       shufflingRef, slot, committee_index, attestation.aggregation_bits)
 
@@ -587,8 +517,8 @@ proc validateAttestation*(
       # Attestation signatures are batch-verified
       let deferredCrypto = batchCrypto
                              .scheduleAttestationCheck(
-                              fork, genesis_validators_root, attestation.data,
-                              pubkey, attestation.signature)
+                              fork, attestation.data, pubkey,
+                              attestation.signature)
       if deferredCrypto.isErr():
         return checkedReject(deferredCrypto.error)
 
@@ -742,8 +672,6 @@ proc validateAggregate*(
 
   let
     fork = pool.dag.forkAtEpoch(aggregate.data.slot.epoch)
-    genesis_validators_root =
-      getStateField(pool.dag.headState, genesis_validators_root)
     attesting_indices = get_attesting_indices(
       shufflingRef, slot, committee_index, aggregate.aggregation_bits)
 
@@ -751,8 +679,8 @@ proc validateAggregate*(
     sig = if checkSignature:
       let deferredCrypto = batchCrypto
                     .scheduleAggregateChecks(
-                      fork, genesis_validators_root,
-                      signedAggregateAndProof, pool.dag, attesting_indices
+                      fork, signedAggregateAndProof, pool.dag,
+                      attesting_indices
                     )
       if deferredCrypto.isErr():
         return checkedReject(deferredCrypto.error)
@@ -818,16 +746,59 @@ proc validateAggregate*(
 
   return ok((attesting_indices, sig))
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#attester_slashing
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/capella/p2p-interface.md#bls_to_execution_change
+proc validateBlsToExecutionChange*(
+    pool: ValidatorChangePool, batchCrypto: ref BatchCrypto,
+    signed_address_change: SignedBLSToExecutionChange,
+    wallEpoch: Epoch): Future[Result[void, ValidationError]] {.async.} =
+  # [IGNORE] `current_epoch >= CAPELLA_FORK_EPOCH`, where `current_epoch` is
+  # defined by the current wall-clock time.
+  if not (wallEpoch >= pool.dag.cfg.CAPELLA_FORK_EPOCH):
+    return errIgnore("validateBlsToExecutionChange: not accepting gossip until Capella")
+
+  # [IGNORE] The `signed_bls_to_execution_change` is the first valid signed bls
+  # to execution change received for the validator with index
+  # `signed_bls_to_execution_change.message.validator_index`.
+  if pool.isSeen(signed_address_change):
+    return errIgnore("validateBlsToExecutionChange: not first signed BLS to execution change received for validator index")
+
+  # [REJECT] All of the conditions within `process_bls_to_execution_change`
+  # pass validation.
+  withState(pool.dag.headState):
+    when consensusFork < ConsensusFork.Capella:
+      return errIgnore("validateBlsToExecutionChange: can't validate against pre-Capella state")
+    else:
+      let res = check_bls_to_execution_change(
+        pool.dag.cfg.genesisFork, forkyState.data, signed_address_change,
+        {skipBlsValidation})
+      if res.isErr:
+        return errReject(res.error)
+
+    # BLS to execution change signatures are batch-verified
+    let deferredCrypto = batchCrypto.scheduleBlsToExecutionChangeCheck(
+      pool.dag.cfg.genesisFork, signed_address_change)
+    if deferredCrypto.isErr():
+      return checkedReject(deferredCrypto.error)
+
+    let (cryptoFut, sig) = deferredCrypto.get()
+    case await cryptoFut
+    of BatchResult.Invalid:
+      return checkedReject("validateBlsToExecutionChange: invalid signature")
+    of BatchResult.Timeout:
+      return errIgnore("validateBlsToExecutionChange: timeout checking signature")
+    of BatchResult.Valid:
+      discard  # keep going only in this case
+
+  return ok()
+
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#attester_slashing
 proc validateAttesterSlashing*(
-    pool: ExitPool, attester_slashing: AttesterSlashing):
+    pool: ValidatorChangePool, attester_slashing: AttesterSlashing):
     Result[void, ValidationError] =
   # [IGNORE] At least one index in the intersection of the attesting indices of
   # each attestation has not yet been seen in any prior attester_slashing (i.e.
   # attester_slashed_indices = set(attestation_1.attesting_indices).intersection(attestation_2.attesting_indices),
   # verify if any(attester_slashed_indices.difference(prior_seen_attester_slashed_indices))).
-  # TODO sequtils2 should be able to make this more reasonable, from asSeq on
-  # down, and can sort and just find intersection that way
   if pool.isSeen(attester_slashing):
     return errIgnore(
       "AttesterSlashing: attester-slashed index already attester-slashed")
@@ -841,9 +812,9 @@ proc validateAttesterSlashing*(
 
   ok()
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#proposer_slashing
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#proposer_slashing
 proc validateProposerSlashing*(
-    pool: ExitPool, proposer_slashing: ProposerSlashing):
+    pool: ValidatorChangePool, proposer_slashing: ProposerSlashing):
     Result[void, ValidationError] =
   # Not from spec; the rest of NBC wouldn't have correctly processed it either.
   if proposer_slashing.signed_header_1.message.proposer_index > high(int).uint64:
@@ -864,9 +835,9 @@ proc validateProposerSlashing*(
 
   ok()
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/phase0/p2p-interface.md#voluntary_exit
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/phase0/p2p-interface.md#voluntary_exit
 proc validateVoluntaryExit*(
-    pool: ExitPool, signed_voluntary_exit: SignedVoluntaryExit):
+    pool: ValidatorChangePool, signed_voluntary_exit: SignedVoluntaryExit):
     Result[void, ValidationError] =
   # [IGNORE] The voluntary exit is the first valid voluntary exit received for
   # the validator with index signed_voluntary_exit.message.validator_index.
@@ -894,7 +865,7 @@ proc validateVoluntaryExit*(
 
   ok()
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.1/specs/altair/p2p-interface.md#sync_committee_subnet_id
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/altair/p2p-interface.md#sync_committee_subnet_id
 proc validateSyncCommitteeMessage*(
     dag: ChainDAGRef,
     batchCrypto: ref BatchCrypto,
@@ -940,7 +911,6 @@ proc validateSyncCommitteeMessage*(
   let
     epoch = msg.slot.epoch
     fork = dag.forkAtEpoch(epoch)
-    genesis_validators_root = dag.genesis_validators_root
     senderPubKey = dag.validatorKey(msg.validator_index).valueOr:
       return errReject("SyncCommitteeMessage: invalid validator index")
 
@@ -949,8 +919,7 @@ proc validateSyncCommitteeMessage*(
       # Attestation signatures are batch-verified
       let deferredCrypto = batchCrypto
                             .scheduleSyncCommitteeMessageCheck(
-                              fork, genesis_validators_root,
-                              msg.slot, msg.beacon_block_root,
+                              fork, msg.slot, msg.beacon_block_root,
                               senderPubKey, msg.signature)
       if deferredCrypto.isErr():
         return errReject(deferredCrypto.error)
@@ -1020,7 +989,6 @@ proc validateContribution*(
   let
     epoch = msg.message.contribution.slot.epoch
     fork = dag.forkAtEpoch(epoch)
-    genesis_validators_root = dag.genesis_validators_root
 
   if msg.message.contribution.aggregation_bits.countOnes() == 0:
     # [REJECT] The contribution has participants
@@ -1041,7 +1009,7 @@ proc validateContribution*(
 
   let sig = if checkSignature:
     let deferredCrypto = batchCrypto.scheduleContributionChecks(
-      fork, genesis_validators_root, msg, subcommitteeIdx, dag)
+      fork, msg, subcommitteeIdx, dag)
     if deferredCrypto.isErr():
       return errReject(deferredCrypto.error)
 
@@ -1089,7 +1057,7 @@ proc validateContribution*(
 
   return ok((sig, participants))
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.0/specs/altair/light-client/p2p-interface.md#light_client_finality_update
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/altair/light-client/p2p-interface.md#light_client_finality_update
 proc validateLightClientFinalityUpdate*(
     pool: var LightClientPool, dag: ChainDAGRef,
     finality_update: ForkedLightClientFinalityUpdate,
@@ -1125,7 +1093,7 @@ proc validateLightClientFinalityUpdate*(
   pool.latestForwardedFinalitySlot = finalized_slot
   ok()
 
-# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.0/specs/altair/light-client/p2p-interface.md#light_client_optimistic_update
+# https://github.com/ethereum/consensus-specs/blob/v1.3.0-rc.5/specs/altair/light-client/p2p-interface.md#light_client_optimistic_update
 proc validateLightClientOptimisticUpdate*(
     pool: var LightClientPool, dag: ChainDAGRef,
     optimistic_update: ForkedLightClientOptimisticUpdate,

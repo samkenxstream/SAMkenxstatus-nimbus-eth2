@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2018-2022 Status Research & Development GmbH
+# Copyright (c) 2018-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -14,7 +14,7 @@ import
   ../beacon_node,
   ../consensus_object_pools/[blockchain_dag, exit_pool, spec_cache],
   ../spec/[deposit_snapshots, eth2_merkleization, forks, network, validator],
-  ../spec/datatypes/[phase0, altair, eip4844],
+  ../spec/datatypes/[phase0, altair, deneb],
   ../validators/message_router_mev
 
 export rest_utils
@@ -254,7 +254,7 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
           return RestApiResponse.jsonError(Http400,
                                            InvalidValidatorIdValueError)
         let ires = id.get()
-        if len(ires) > MaximumValidatorIds:
+        if len(ires) > ServerMaximumValidatorIds:
           return RestApiResponse.jsonError(Http400,
                                            MaximumNumberOfValidatorIdsError)
         ires
@@ -445,7 +445,7 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
           return RestApiResponse.jsonError(Http400,
                                            InvalidValidatorIdValueError)
         let ires = id.get()
-        if len(ires) > MaximumValidatorIds:
+        if len(ires) > ServerMaximumValidatorIds:
           return RestApiResponse.jsonError(Http400,
                                            MaximumNumberOfValidatorIdsError)
         ires
@@ -796,23 +796,15 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
                                              $error)
           forked = ForkedSignedBeaconBlock(restBlock)
 
-        if forked.kind != node.dag.cfg.blockForkAtEpoch(
+        if forked.kind != node.dag.cfg.consensusForkAtEpoch(
              getForkedBlockField(forked, slot).epoch):
+          doAssert strictVerification notin node.dag.updateFlags
           return RestApiResponse.jsonError(Http400, InvalidBlockObjectError)
 
         withBlck(forked):
           blck.root = hash_tree_root(blck.message)
-          let signedBlockAndBlobs =
-            when blck is eip4844.SignedBeaconBlock:
-              # TODO: Fetch blobs from EE
-              eip4844.SignedBeaconBlockAndBlobsSidecar(
-                beacon_block: blck,
-                blobs_sidecar: eip4844.BlobsSidecar()
-              )
-            else:
-              blck
-
-          await node.router.routeSignedBeaconBlock(signedBlockAndBlobs)
+          # TODO: Fetch blobs from EE when blck is deneb.SignedBeaconBlock
+          await node.router.routeSignedBeaconBlock(blck)
 
     if res.isErr():
       return RestApiResponse.jsonError(
@@ -839,7 +831,7 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
 
     let
       currentEpochFork =
-        node.dag.cfg.stateForkAtEpoch(node.currentSlot().epoch())
+        node.dag.cfg.consensusForkAtEpoch(node.currentSlot().epoch())
       version = request.headers.getString("eth-consensus-version")
       body = contentBody.get()
 
@@ -848,14 +840,13 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
       return RestApiResponse.jsonError(Http400, BlockIncorrectFork)
 
     case currentEpochFork
-    of BeaconStateFork.EIP4844:
-      return RestApiResponse.jsonError(Http500, $eip4844ImplementationMissing)
-    of BeaconStateFork.Capella:
-      return RestApiResponse.jsonError(Http500, $capellaImplementationMissing)
-    of BeaconStateFork.Bellatrix:
+    of ConsensusFork.Deneb:
+      return RestApiResponse.jsonError(Http500, $denebImplementationMissing)
+    of ConsensusFork.Capella:
       let res =
         block:
-          let restBlock = decodeBodyJsonOrSsz(SignedBlindedBeaconBlock, body).valueOr:
+          let restBlock = decodeBodyJsonOrSsz(
+              capella_mev.SignedBlindedBeaconBlock, body).valueOr:
             return RestApiResponse.jsonError(Http400, InvalidBlockObjectError,
                                              $error)
           await node.unblindAndRouteBlockMEV(restBlock)
@@ -867,7 +858,23 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
         return RestApiResponse.jsonError(Http202, BlockValidationError)
 
       return RestApiResponse.jsonMsgResponse(BlockValidationSuccess)
-    of BeaconStateFork.Altair, BeaconStateFork.Phase0:
+    of ConsensusFork.Bellatrix:
+      let res =
+        block:
+          let restBlock = decodeBodyJsonOrSsz(
+              bellatrix_mev.SignedBlindedBeaconBlock, body).valueOr:
+            return RestApiResponse.jsonError(Http400, InvalidBlockObjectError,
+                                             $error)
+          await node.unblindAndRouteBlockMEV(restBlock)
+
+      if res.isErr():
+        return RestApiResponse.jsonError(
+          Http503, BeaconNodeInSyncError, $res.error())
+      if res.get().isNone():
+        return RestApiResponse.jsonError(Http202, BlockValidationError)
+
+      return RestApiResponse.jsonMsgResponse(BlockValidationSuccess)
+    of ConsensusFork.Altair, ConsensusFork.Phase0:
       # Pre-Bellatrix, this endpoint will accept a `SignedBeaconBlock`.
       #
       # This is mostly the same as /eth/v1/beacon/blocks for phase 0 and
@@ -879,22 +886,13 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
                                            $error)
         forked = ForkedSignedBeaconBlock(restBlock)
 
-      if forked.kind != node.dag.cfg.blockForkAtEpoch(
+      if forked.kind != node.dag.cfg.consensusForkAtEpoch(
            getForkedBlockField(forked, slot).epoch):
         return RestApiResponse.jsonError(Http400, InvalidBlockObjectError)
 
       let res = withBlck(forked):
         blck.root = hash_tree_root(blck.message)
-        let signedBlockAndBlobs =
-          when blck is eip4844.SignedBeaconBlock:
-            eip4844.SignedBeaconBlockAndBlobsSidecar(
-              beacon_block: blck,
-              blobs_sidecar: eip4844.BlobsSidecar()
-            )
-          else:
-            blck
-
-        await node.router.routeSignedBeaconBlock(signedBlockAndBlobs)
+        await node.router.routeSignedBeaconBlock(blck)
 
       if res.isErr():
         return RestApiResponse.jsonError(
@@ -934,7 +932,7 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
           return RestApiResponse.jsonError(Http404, BlockNotFoundError)
 
         let
-          fork = node.dag.cfg.blockForkAtEpoch(bid.slot.epoch)
+          fork = node.dag.cfg.consensusForkAtEpoch(bid.slot.epoch)
           headers = [("eth-consensus-version", fork.toString())]
 
         RestApiResponse.sszResponsePlain(data, headers)
@@ -1065,7 +1063,8 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
   # https://ethereum.github.io/beacon-APIs/#/Beacon/getPoolAttesterSlashings
   router.api(MethodGet, "/eth/v1/beacon/pool/attester_slashings") do (
     ) -> RestApiResponse:
-    return RestApiResponse.jsonResponse(toSeq(node.exitPool.attester_slashings))
+    return RestApiResponse.jsonResponse(
+      toSeq(node.validatorChangePool.attester_slashings))
 
   # https://ethereum.github.io/beacon-APIs/#/Beacon/submitPoolAttesterSlashings
   router.api(MethodPost, "/eth/v1/beacon/pool/attester_slashings") do (
@@ -1090,7 +1089,8 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
   # https://ethereum.github.io/beacon-APIs/#/Beacon/getPoolProposerSlashings
   router.api(MethodGet, "/eth/v1/beacon/pool/proposer_slashings") do (
     ) -> RestApiResponse:
-    return RestApiResponse.jsonResponse(toSeq(node.exitPool.proposer_slashings))
+    return RestApiResponse.jsonResponse(
+      toSeq(node.validatorChangePool.proposer_slashings))
 
   # https://ethereum.github.io/beacon-APIs/#/Beacon/submitPoolProposerSlashings
   router.api(MethodPost, "/eth/v1/beacon/pool/proposer_slashings") do (
@@ -1111,6 +1111,47 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
                                        ProposerSlashingValidationError,
                                        $res.error())
     return RestApiResponse.jsonMsgResponse(ProposerSlashingValidationSuccess)
+
+  # https://ethereum.github.io/beacon-APIs/?urls.primaryName=dev#/Beacon/getPoolBLSToExecutionChanges
+  # https://github.com/ethereum/beacon-APIs/blob/86850001845df9163da5ae9605dbf15cd318d5d0/apis/beacon/pool/bls_to_execution_changes.yaml
+  router.api(MethodGet, "/eth/v1/beacon/pool/bls_to_execution_changes") do (
+    ) -> RestApiResponse:
+    return RestApiResponse.jsonResponse(
+      toSeq(node.validatorChangePool.bls_to_execution_changes_gossip) &
+      toSeq(node.validatorChangePool.bls_to_execution_changes_api))
+
+  # https://ethereum.github.io/beacon-APIs/?urls.primaryName=dev#/Beacon/submitPoolBLSToExecutionChange
+  # https://github.com/ethereum/beacon-APIs/blob/86850001845df9163da5ae9605dbf15cd318d5d0/apis/beacon/pool/bls_to_execution_changes.yaml
+  router.api(MethodPost, "/eth/v1/beacon/pool/bls_to_execution_changes") do (
+    contentBody: Option[ContentBody]) -> RestApiResponse:
+    if node.currentSlot().epoch() < node.dag.cfg.CAPELLA_FORK_EPOCH:
+      return RestApiResponse.jsonError(Http400,
+                                       InvalidBlsToExecutionChangeObjectError,
+                                       "Attempt to add to BLS to execution change pool pre-Capella")
+    let bls_to_execution_changes =
+      block:
+        if contentBody.isNone():
+          return RestApiResponse.jsonError(Http400, EmptyRequestBodyError)
+        let dres = decodeBody(seq[SignedBLSToExecutionChange], contentBody.get())
+        if dres.isErr():
+          return RestApiResponse.jsonError(Http400,
+                                           InvalidBlsToExecutionChangeObjectError,
+                                           $dres.error())
+        dres.get()
+    let res = await allFinished(mapIt(
+      bls_to_execution_changes, node.router.routeBlsToExecutionChange(it)))
+    for individual_res in res:
+      doAssert individual_res.finished()
+      if individual_res.failed():
+        return RestApiResponse.jsonError(Http400,
+                                         BlsToExecutionChangeValidationError,
+                                         $individual_res.error[].msg)
+      let fut_result = individual_res.read()
+      if fut_result.isErr():
+        return RestApiResponse.jsonError(Http400,
+                                         BlsToExecutionChangeValidationError,
+                                         $fut_result.error())
+    return RestApiResponse.jsonMsgResponse(BlsToExecutionChangeValidationSuccess)
 
   # https://ethereum.github.io/beacon-APIs/#/Beacon/submitPoolSyncCommitteeSignatures
   router.api(MethodPost, "/eth/v1/beacon/pool/sync_committees") do (
@@ -1146,7 +1187,8 @@ proc installBeaconApiHandlers*(router: var RestRouter, node: BeaconNode) =
   # https://ethereum.github.io/beacon-APIs/#/Beacon/getPoolVoluntaryExits
   router.api(MethodGet, "/eth/v1/beacon/pool/voluntary_exits") do (
     ) -> RestApiResponse:
-    return RestApiResponse.jsonResponse(toSeq(node.exitPool.voluntary_exits))
+    return RestApiResponse.jsonResponse(
+      toSeq(node.validatorChangePool.voluntary_exits))
 
   # https://ethereum.github.io/beacon-APIs/#/Beacon/submitPoolVoluntaryExit
   router.api(MethodPost, "/eth/v1/beacon/pool/voluntary_exits") do (

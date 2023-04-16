@@ -1,5 +1,5 @@
 # beacon_chain
-# Copyright (c) 2021-2022 Status Research & Development GmbH
+# Copyright (c) 2021-2023 Status Research & Development GmbH
 # Licensed and distributed under either of
 #   * MIT license (license terms in the root directory or at https://opensource.org/licenses/MIT).
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
@@ -9,9 +9,9 @@
 
 import
   yaml,
-  ../../beacon_chain/spec/[state_transition, forks]
+  ../../beacon_chain/spec/[state_transition, forks],
+  ./os_ops
 
-from std/os import walkDir, walkPattern, `/`
 from std/sequtils import toSeq
 from streams import close, openFileStream
 from ../testutil import preset, suite, test
@@ -128,18 +128,18 @@ suite "EF - Capella - Transition " & preset():
       capella.SignedBeaconBlock, cfg, "EF - Capella - Transition",
       TransitionDir, path, transitionInfo.fork_block)
 
-from ../../beacon_chain/spec/datatypes/eip4844 import
+from ../../beacon_chain/spec/datatypes/deneb import
   BeaconState, SignedBeaconBlock
 
-suite "EF - EIP4844 - Transition " & preset():
+suite "EF - Deneb - Transition " & preset():
   const TransitionDir =
-    SszTestsDir/const_preset/"eip4844"/"transition"/"core"/"pyspec_tests"
+    SszTestsDir/const_preset/"deneb"/"transition"/"core"/"pyspec_tests"
 
   for kind, path in walkDir(TransitionDir, relative = true, checkDir = true):
     let transitionInfo = getTransitionInfo(TransitionDir / path)
     var cfg = defaultRuntimeConfig
-    cfg.EIP4844_FORK_EPOCH = transitionInfo.fork_epoch.Epoch
+    cfg.DENEB_FORK_EPOCH = transitionInfo.fork_epoch.Epoch
     runTest(
-      capella.BeaconState, eip4844.BeaconState, capella.SignedBeaconBlock,
-      eip4844.SignedBeaconBlock, cfg, "EF - EIP4844 - Transition",
+      capella.BeaconState, deneb.BeaconState, capella.SignedBeaconBlock,
+      deneb.SignedBeaconBlock, cfg, "EF - Deneb - Transition",
       TransitionDir, path, transitionInfo.fork_block)

@@ -5,10 +5,7 @@
 #   * Apache v2 license (license terms in the root directory or at https://www.apache.org/licenses/LICENSE-2.0).
 # at your option. This file may not be copied, modified, or distributed except according to those terms.
 
-when (NimMajor, NimMinor) < (1, 4):
-  {.push raises: [Defect].}
-else:
-  {.push raises: [].}
+{.push raises: [].}
 
 import chronicles
 import ../beacon_node,
@@ -41,7 +38,7 @@ proc installLightClientApiHandlers*(router: var RestRouter, node: BeaconNode) =
       when lcDataFork > LightClientDataFork.None:
         let
           contextEpoch = forkyBootstrap.contextEpoch
-          contextFork = node.dag.cfg.stateForkAtEpoch(contextEpoch)
+          contextFork = node.dag.cfg.consensusForkAtEpoch(contextEpoch)
         return
           if contentType == sszMediaType:
             let headers = [("eth-consensus-version", contextFork.toString())]
@@ -104,11 +101,11 @@ proc installLightClientApiHandlers*(router: var RestRouter, node: BeaconNode) =
             forkyUpdate.contextEpoch
           else:
             continue
-        contextFork = node.dag.cfg.stateForkAtEpoch(contextEpoch)
+        contextFork = node.dag.cfg.consensusForkAtEpoch(contextEpoch)
       updates.add RestVersioned[ForkedLightClientUpdate](
         data: update,
         jsonVersion: contextFork,
-        sszContext: node.dag.forkDigests[].atStateFork(contextFork))
+        sszContext: node.dag.forkDigests[].atConsensusFork(contextFork))
 
     return
       if contentType == sszMediaType:
@@ -136,7 +133,7 @@ proc installLightClientApiHandlers*(router: var RestRouter, node: BeaconNode) =
       when lcDataFork > LightClientDataFork.None:
         let
           contextEpoch = forkyFinalityUpdate.contextEpoch
-          contextFork = node.dag.cfg.stateForkAtEpoch(contextEpoch)
+          contextFork = node.dag.cfg.consensusForkAtEpoch(contextEpoch)
         return
           if contentType == sszMediaType:
             let headers = [("eth-consensus-version", contextFork.toString())]
@@ -167,7 +164,7 @@ proc installLightClientApiHandlers*(router: var RestRouter, node: BeaconNode) =
       when lcDataFork > LightClientDataFork.None:
         let
           contextEpoch = forkyOptimisticUpdate.contextEpoch
-          contextFork = node.dag.cfg.stateForkAtEpoch(contextEpoch)
+          contextFork = node.dag.cfg.consensusForkAtEpoch(contextEpoch)
         return
           if contentType == sszMediaType:
             let headers = [("eth-consensus-version", contextFork.toString())]
